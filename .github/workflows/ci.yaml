@@ -1,14 +1,20 @@
 name: ci
 
 # The deploy/crd and chart crds/ paths are included (ADR-0014) so a hand-edit
-# of a generated CRD copy that touches nothing under prototype/ still triggers
+# of a generated CRD copy that touches nothing under the Go source still triggers
 # the manifests-drift job below and gets rejected.
 on:
   push:
     branches: [main]
     paths:
       [
-        "prototype/**",
+        "cmd/**",
+        "internal/**",
+        "api/**",
+        "go.mod",
+        "go.sum",
+        "Makefile",
+        "test/**",
         "deploy/crd/**",
         "deploy/chart/k8s-bridge/crds/**",
         ".github/workflows/ci.yaml",
@@ -16,7 +22,13 @@ on:
   pull_request:
     paths:
       [
-        "prototype/**",
+        "cmd/**",
+        "internal/**",
+        "api/**",
+        "go.mod",
+        "go.sum",
+        "Makefile",
+        "test/**",
         "deploy/crd/**",
         "deploy/chart/k8s-bridge/crds/**",
         ".github/workflows/ci.yaml",
