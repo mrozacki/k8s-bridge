@@ -56,7 +56,7 @@ lint:
 tidy:
 	go mod tidy
 
-# Layer 3 (E2E) is the assertion-annotated runbook: ../../experiments/DEMO.md
+# Layer 3 (E2E) is the assertion-annotated runbook: experiments/DEMO.md
 # — it needs a live GKE cluster and is run manually / per session.
 run: build
 	./bin/k8s-bridge --config config/example-config.yaml
@@ -162,8 +162,8 @@ generate:
 # api/v1alpha1 — chart-ci's crd-sync-gate proves they stay spec-identical and
 # ci.yaml's manifests-drift job proves they match the Go markers.
 CRD_COPIES := \
-	../../deploy/crd/workloadmixing-crd.yaml \
-	../../deploy/chart/k8s-bridge/crds/workloadmixing-crd.yaml \
+	deploy/crd/workloadmixing-crd.yaml \
+	deploy/chart/k8s-bridge/crds/workloadmixing-crd.yaml \
 	test/crd/workloadmixing-crd.yaml
 
 # manifests regenerates the CRD YAML from the typed API (ADR-0014: the CRD is

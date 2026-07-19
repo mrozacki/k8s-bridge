@@ -78,8 +78,8 @@
 # need experiments/ manifests at all (no GKE, no Slinky, no DWS in this
 # scope).
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.." # -> .
-REPO_ROOT="$(cd ../.. && pwd)"
+cd "$(dirname "${BASH_SOURCE[0]}")/../.." # -> repo root
+REPO_ROOT="$(pwd)"
 CHART_DIR="${REPO_ROOT}/deploy/chart/k8s-bridge"
 
 CLUSTER_NAME="${CLUSTER_NAME:-k8s-bridge-e2e}"
