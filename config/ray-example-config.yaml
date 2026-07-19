@@ -1,0 +1,43 @@
+# Example ray-bridge configuration.
+#
+# ray-bridge brings the inner workloads of a shared, long-lived KubeRay
+# RayCluster under Kueue admission (ADR-0006/0012). An inner workload is a
+# RayJob that targets an existing cluster via clusterSelector (ray.io/cluster)
+# and is submitted suspended; ray-bridge stands up dedicated worker capacity as
+# a Kueue-admitted JobSet, then unsuspends and pins the RayJob once that
+# capacity is admitted and the workers have joined.
+
+# Namespace where inner RayJobs are watched and worker JobSets are created.
+namespace: ray
+
+# Global Kueue LocalQueue for worker JobSets (a pool mapping or the RayJob's
+# ray-bridge.x-k8s.io/local-queue annotation may override per job).
+localQueue: ray-main
+
+# The shared RayCluster(s) under management. `name` must match the value inner
+# RayJobs put in clusterSelector[ray.io/cluster]; `headAddress` is what the
+# dedicated workers dial with `ray start --address`.
+managedClusters:
+  - name: shared-cluster
+    headAddress: shared-cluster-head-svc.ray:6379
+
+# Pool -> WorkloadPriorityClass mapping — the analog of the Slurm side's
+# partitionMappings. An inner RayJob selects its pool with the
+# ray-bridge.x-k8s.io/pool annotation. A job whose pool is unmapped is ignored.
+poolMappings:
+  - pool: batch
+    workloadPriorityClass: normal-priority
+  - pool: interactive
+    workloadPriorityClass: high-priority
+    # Optional per-pool LocalQueue override (multi-team).
+    localQueue: team-interactive
+
+# The dedicated Ray worker pods ray-bridge stands up per inner workload.
+worker:
+  image: rayproject/ray:2.9.0
+  gpuResourceName: nvidia.com/gpu
+  # Defaults used when an inner RayJob omits the worker-shape annotations
+  # (ray-bridge.x-k8s.io/workers, /worker-cpus, /worker-gpus, /worker-memory).
+  defaultWorkers: 1
+  defaultCpus: 1
+  defaultMemoryMB: 1024

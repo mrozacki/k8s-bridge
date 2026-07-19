@@ -1,0 +1,91 @@
+# Experiment 06: two teams, one cohort, borrowing/reclaim + TAS.
+#
+# team-a and team-b each own 6 CPU nominally and share cohort "research".
+# team-b guarantees itself 4 CPU (lendingLimit: 2 => it lends at most 2) —
+# the pattern ADR-0006/0007 prescribe for shared-RayCluster base capacity.
+# Both queues use the TAS flavor (tas-spot from experiment 05) — whether
+# TAS composes with cohorts is itself a question this experiment answers.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: team-a
+spec:
+  cohort: research
+  namespaceSelector: {}
+  preemption:
+    withinClusterQueue: LowerPriority
+    reclaimWithinCohort: Any
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: tas-spot
+          resources:
+            - name: cpu
+              nominalQuota: 6
+            - name: memory
+              nominalQuota: 24Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: team-b
+spec:
+  cohort: research
+  namespaceSelector: {}
+  preemption:
+    withinClusterQueue: LowerPriority
+    reclaimWithinCohort: Any
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: tas-spot
+          resources:
+            - name: cpu
+              nominalQuota: 6
+              lendingLimit: 2
+            - name: memory
+              nominalQuota: 24Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata: { name: team-a, namespace: default }
+spec: { clusterQueue: team-a }
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata: { name: team-a, namespace: slurm-jobs }
+spec: { clusterQueue: team-a }
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata: { name: team-b, namespace: default }
+spec: { clusterQueue: team-b }
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata: { name: team-b, namespace: slurm-jobs }
+spec: { clusterQueue: team-b }
+---
+# team-b filler: normal-priority batch that will BORROW team-a's idle quota.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: teamb-filler-
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: team-b
+    kueue.x-k8s.io/priority-class: normal-priority
+spec:
+  parallelism: 4
+  completions: 4
+  suspend: true
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: w
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 600"]
+          resources:
+            requests: { cpu: "2", memory: 1Gi }
+            limits: { cpu: "2", memory: 1Gi }

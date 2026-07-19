@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tc-f2-dws
+  namespace: slurm-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: dws-gpu-lq
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: test-dws
+          image: nvidia/cuda:12.1.1-base-ubuntu22.04
+          command: ["sh", "-c", "nvidia-smi && sleep 30 && echo GPU_JOB_DONE"]
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              nvidia.com/gpu: 1
+            limits:
+              nvidia.com/gpu: 1

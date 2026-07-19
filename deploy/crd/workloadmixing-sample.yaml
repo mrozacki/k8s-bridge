@@ -1,0 +1,30 @@
+# Sample WorkloadMixing CR — a live run used exactly this shape
+# (bridge started with --workloadmixing slurm-jobs/playground).
+apiVersion: k8s-bridge.x-k8s.io/v1alpha1
+kind: WorkloadMixing
+metadata:
+  name: playground
+  namespace: slurm-jobs
+spec:
+  # Local dev used a plaintext localhost endpoint; that now requires an explicit
+  # opt-in (the CRD's CEL rule rejects http:// otherwise). In-cluster, use https.
+  slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
+  allowInsecureHTTP: true
+  slurmUser: "k8s-bridge" # dedicated low-privilege Slurm REST user, not root
+  slurmTokenFile: "/tmp/wm-slurm-token"
+  localQueue: "team-a"
+  pollInterval: "10s"
+  maxUserPriority: 10000 # cap user-originated priority requests (security audit H1)
+  partitionMappings:
+    - partitionName: "mixing"
+      workloadPriorityClass: "normal-priority"
+    - partitionName: "mixing-high"
+      workloadPriorityClass: "high-priority"
+    - partitionName: "mixing-gpu"
+      workloadPriorityClass: "gpu-priority"
+  slurmd:
+    image: "ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04"
+    confServer: "slurm-controller.slurm.svc.cluster.local:6817"
+    authSecretName: "slurm-auth-slurm"
+  topology:
+    preferredLevel: "example.com/block"

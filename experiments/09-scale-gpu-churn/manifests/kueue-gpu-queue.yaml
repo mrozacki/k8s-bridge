@@ -1,0 +1,79 @@
+# Kueue GPU queuing topology for the scale + churn cluster. Modeled on
+# experiments/01-gke-playground/manifests/kueue-config.yaml's ResourceFlavor +
+# ClusterQueue + LocalQueue + WorkloadPriorityClass shape, extended with the
+# simulated nvidia.com/gpu resource (ADR-0010) as a covered resource so Kueue
+# actually gates admission on GPU count, not just cpu/memory.
+#
+# Sizing rationale (see scripts/00-env.sh node math): GPU_PER_NODE=8 simulated
+# units/node, NODES_FOR_TARGET nodes needed for RUNNING_TARGET=500 running
+# slurmd-GPU-pods. nominalQuota below is set to exactly RUNNING_TARGET so
+# Kueue admits at most 500 concurrently and holds the rest (up to
+# PENDING_TARGET=3000) as PENDING — this is what produces the "500 running /
+# 3000 pending" split the live run is validating, independent of how many
+# nodes actually exist at a given moment (autoscaling brings nodes up to
+# match admitted demand, not the other way around).
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: gpu-sim-e2
+spec:
+  nodeLabels:
+    workload-mixing/gpu-sim: "true"
+  # Matches the gpu-sim-spot pool's taint (scripts/01-create-cluster.sh) so
+  # Kueue-admitted pods land only on nodes actually advertising the simulated
+  # GPU resource, and nowhere else.
+  tolerations:
+    - key: workload-mixing/gpu-sim
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: gpu-queue
+spec:
+  namespaceSelector: {}
+  preemption:
+    withinClusterQueue: LowerPriority
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+      flavors:
+        - name: gpu-sim-e2
+          resources:
+            - name: cpu
+              nominalQuota: "50"        # 500 pods * 100m cpu request each
+            - name: memory
+              nominalQuota: 128Gi       # 500 pods * 256Mi memory request each
+            - name: nvidia.com/gpu
+              # The binding constraint (see 00-env.sh header): caps concurrent
+              # admission at RUNNING_TARGET regardless of node count, which is
+              # exactly the "500 running, remainder pending" split this
+              # experiment is validating.
+              nominalQuota: "500"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: gpu-queue
+  namespace: slurm-jobs
+spec:
+  clusterQueue: gpu-queue
+---
+# Reused from experiments/01-gke-playground/manifests/kueue-config.yaml —
+# same WorkloadPriorityClass names so this cluster's bridge-values-scale.yaml
+# partitionMappings entry (workloadPriorityClass: normal-priority) resolves
+# without inventing a new class.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: normal-priority
+value: 100
+description: "Default for batch workloads (Slurm 'main' partition, K8s Jobs, Ray)"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: high-priority
+value: 1000
+description: "Slurm 'high' partition and latency-sensitive serving"

@@ -1,0 +1,22 @@
+# Always rendered (unlike serviceMonitor/prometheusRule below, which need
+# prometheus-operator CRDs this chart cannot assume are installed): a plain
+# Service fronting the controller's single port (8080), which already serves
+# /healthz, /readyz and /metrics. Gives a stable in-cluster address for
+# scraping metrics even without prometheus-operator (e.g. a plain Prometheus
+# with a static scrape_config, or `kubectl port-forward svc/...`).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "k8s-bridge.metricsServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type | default "ClusterIP" }}
+  selector:
+    {{- include "k8s-bridge.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.service.port | default 8080 }}
+      targetPort: metrics
+      protocol: TCP

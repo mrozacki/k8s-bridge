@@ -1,0 +1,172 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "k8s-bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas | default 1 }}
+  # Recreate (L9 fix): with leader election on a single replica, RollingUpdate
+  # deadlocks — the old pod keeps renewing its Lease while Running, so the new
+  # pod never wins leadership, never becomes Ready, and the rollout stalls
+  # (found live). Recreate stops the old pod first; a brief reconcile
+  # gap is safe (new Slurm jobs stay held until the bridge returns — MVD §6.1).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "k8s-bridge.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- if or (eq .Values.configSource "file") .Values.podAnnotations }}
+      annotations:
+        {{- if eq .Values.configSource "file" }}
+        # Roll the pod when the config ConfigMap changes. In file mode the
+        # controller reads config once at startup (no hot-reload — that is a
+        # CR-mode feature), so without this a `helm upgrade` that only changes
+        # config would leave the old pod running stale config (found live,
+        # experiment 09).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        {{- include "k8s-bridge.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "k8s-bridge.fullname" . }}
+      {{- if .Values.priorityClass.create }}
+      priorityClassName: {{ include "k8s-bridge.priorityClassName" . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The controller reaches only the kube-apiserver (via the SA token) and
+      # slurmrestd; it does not need the SA token projected with the default
+      # broad audience, but does use it for the API — so keep it mounted.
+      securityContext:
+        runAsNonRoot: true
+        # fsGroup makes kubelet group-own mounted volumes (incl. the token
+        # Secret) by this GID, so the non-root container can read a 0440-mode
+        # Secret file. Without it the token mounts root:root and the
+        # distroless-nonroot UID (65532) gets "permission denied" reading it
+        # — found live on the first in-cluster deploy (A4). 65532 is the
+        # distroless "nonroot" GID; keep in sync with the image's user.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bridge
+          image: {{ include "k8s-bridge.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # The controller sets its leader-election Lease namespace from
+            # this (see leaderElectionNamespace in main.go). The Lease RBAC is
+            # scoped to the release namespace, so the lock must live here — a
+            # missing/`default` value made leader election forbidden out of
+            # the box (found live, experiment 09, A4).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          args:
+            {{- if eq .Values.configSource "cr" }}
+            {{- if .Values.workloadmixing.name }}
+            # CR mode, single-CR binding: the controller loads config from
+            # exactly ONE WorkloadMixing resource (audit C7) — the
+            # compatibility path; leave workloadmixing.name empty for the
+            # supervisor default (ADR-0015). The namespace defaults to the
+            # release namespace, matching the chart's namespaced RBAC.
+            - "--workloadmixing"
+            - {{ printf "%s/%s" (.Values.workloadmixing.namespace | default .Release.Namespace) .Values.workloadmixing.name | quote }}
+            {{- else }}
+            {{- if and .Values.workloadmixing.namespace (ne .Values.workloadmixing.namespace .Release.Namespace) }}
+            {{- fail (printf "workloadmixing.namespace=%q without workloadmixing.name is not supported: supervisor mode watches the release namespace (%q) only. Set workloadmixing.name to bind to a single CR elsewhere, or drop workloadmixing.namespace." .Values.workloadmixing.namespace .Release.Namespace) }}
+            {{- end }}
+            # CR mode, supervisor (ADR-0015 Phase A): the controller runs
+            # one reconcile loop per WorkloadMixing in POD_NAMESPACE (the
+            # release namespace), started/stopped as CRs come and go.
+            - "--config-source=cr"
+            {{- end }}
+            {{- else if eq .Values.configSource "file" }}
+            - "--config"
+            - "/etc/k8s-bridge/config.yaml"
+            {{- else }}
+            {{- fail (printf "configSource must be \"file\" or \"cr\", got %q" .Values.configSource) }}
+            {{- end }}
+            # Serves /healthz and /readyz alongside the metrics endpoint.
+            - "--metrics-addr"
+            - ":8080"
+            # client-go rate ceiling (audit P8b; configurable since the
+            # suite-E scale run — lower it on clusters whose admission
+            # webhooks choke on JobSet-creation bursts).
+            - "--kube-api-qps={{ .Values.kubeClient.qps | default 20 }}"
+            - "--kube-api-burst={{ .Values.kubeClient.burst | default 40 }}"
+            {{- with .Values.allowedSlurmdImages }}
+            - "--allowed-slurmd-images"
+            - {{ join "," . | quote }}
+            {{- end }}
+            # ADR-0011: leader election via a coordination.k8s.io Lease so a
+            # second replica sits idle instead of double-processing. The
+            # flag defaults to true in the binary too; passing it explicitly
+            # here makes the chart's stance visible in `kubectl describe`.
+            - "--leader-elect={{ .Values.leaderElect }}"
+            # L9: short lease/renew so leadership hands over quickly on restart.
+            - "--leader-lease-duration={{ .Values.leaseDurationSeconds | default 15 }}s"
+            - "--leader-renew-deadline={{ .Values.renewDeadlineSeconds | default 10 }}s"
+          ports:
+            - { name: metrics, containerPort: 8080 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          # Generous initialDelay/period: the reconcile tick is 10s and the
+          # first tick must complete (slurmrestd reachability, auth) before
+          # the process is meaningfully "ready".
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if eq .Values.configSource "file" }}
+            - { name: config, mountPath: /etc/k8s-bridge, readOnly: true }
+            {{- end }}
+            - { name: token, mountPath: /var/run/secrets/slurm, readOnly: true }
+      volumes:
+        {{- if eq .Values.configSource "file" }}
+        - name: config
+          configMap:
+            name: {{ include "k8s-bridge.fullname" . }}-config
+        {{- end }}
+        - name: token
+          secret:
+            secretName: {{ .Values.slurmTokenSecret }}
+            # 0440 (not 0400) so the fsGroup above can read it; owner+group
+            # read only, no world/other access. Pairs with pod fsGroup 65532.
+            defaultMode: 0440

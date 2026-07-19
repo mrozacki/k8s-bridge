@@ -1,0 +1,14 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: job-high
+  namespace: ray
+  annotations:
+    ray-bridge.x-k8s.io/pool: interactive
+    ray-bridge.x-k8s.io/workers: "1"
+    ray-bridge.x-k8s.io/worker-cpus: "2"
+spec:
+  entrypoint: "python -c \"import ray,time; ray.init(address='auto'); print('HIGH_RUNNING'); time.sleep(120)\""
+  entrypointResources: '{"wm-job-job-high": 1}'
+  clusterSelector:
+    ray.io/cluster: shared-cluster

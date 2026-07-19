@@ -1,0 +1,63 @@
+# Custom Compute Classes: declarative machine
+# preference lists. GKE's node auto-provisioning creates node pools per
+# class on demand; the workload only says WHICH CLASS it wants.
+#
+# econo: spot E2 first, on-demand E2 as fallback (mixed consumption models)
+# perf:  on-demand N2 (different VM family)
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: econo
+spec:
+  priorities:
+    - machineFamily: e2
+      spot: true
+    - machineFamily: e2
+  nodePoolAutoCreation:
+    enabled: true
+  whenUnsatisfiable: DoNotScaleUp
+---
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: perf
+spec:
+  priorities:
+    - machineFamily: n2
+  nodePoolAutoCreation:
+    enabled: true
+  whenUnsatisfiable: DoNotScaleUp
+---
+# Probes: one pod per class; verification = the node each pod lands on
+# (instance family + spot label).
+apiVersion: batch/v1
+kind: Job
+metadata: { name: ccc-probe-econo, namespace: default }
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector: { cloud.google.com/compute-class: econo }
+      containers:
+        - name: w
+          image: busybox:1.36
+          command: ["sh", "-c", "echo econo on $(hostname); sleep 120"]
+          resources:
+            requests: { cpu: "1", memory: 1Gi }
+            limits: { cpu: "1", memory: 1Gi }
+---
+apiVersion: batch/v1
+kind: Job
+metadata: { name: ccc-probe-perf, namespace: default }
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector: { cloud.google.com/compute-class: perf }
+      containers:
+        - name: w
+          image: busybox:1.36
+          command: ["sh", "-c", "echo perf on $(hostname); sleep 120"]
+          resources:
+            requests: { cpu: "1", memory: 1Gi }
+            limits: { cpu: "1", memory: 1Gi }

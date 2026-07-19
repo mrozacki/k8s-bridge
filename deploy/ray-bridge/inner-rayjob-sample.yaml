@@ -1,0 +1,41 @@
+# Sample inner RayJob — WITH the admission webhook installed (ADR-0013).
+#
+# Companion to experiments/10-ray-bridge/manifests/inner-rayjob-annotated.yaml
+# (the no-webhook / manual variant). Read that file first for the full
+# explanation of every field; this file only calls out what changes when
+# internal/raywebhook is deployed and wired up for your namespace (see
+# deploy/ray-bridge/webhook.yaml and README.md, "Submitting an inner
+# workload").
+#
+# Full mechanism: docs/adr/0013-ray-pin-gate-admission.md
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: inner-example
+  namespace: ray   # must carry the ray-bridge.x-k8s.io/managed: "true" label
+                   # for the webhook's namespaceSelector to intercept it
+                   # (see webhook.yaml) — set on the Namespace object, not here.
+  annotations:
+    # Still required: the webhook only injects the PIN, not these
+    # capacity-request annotations. It DENIES the RayJob at admission time if
+    # ray-bridge.x-k8s.io/pool is missing or unmapped, so this is not optional
+    # in practice even though nothing enforces the others.
+    ray-bridge.x-k8s.io/pool: "batch"
+    ray-bridge.x-k8s.io/workers: "2"
+    ray-bridge.x-k8s.io/worker-cpus: "2"
+spec:
+  entrypoint: "python -c \"import socket; print('INNER_EXAMPLE_RAN_ON=' + socket.gethostname())\""
+
+  # --- entrypointResources is DELIBERATELY OMITTED here ------------------
+  # With the webhook installed, you do not set the pin yourself: on CREATE,
+  # internal/raywebhook.Handler.Handle computes "wm-job-<metadata.name>"
+  # (raytranslate.PinResource) and patches it into spec.entrypointResources
+  # for you (merging with any resources you did provide — see handler.go).
+  # If you also submit your own entrypointResources, the webhook merges the
+  # pin into it rather than overwriting it — safe to include your own Ray
+  # custom resource requests alongside the pin.
+  clusterSelector:
+    ray.io/cluster: shared-cluster
+
+  # Do NOT set spec.suspend — see inner-rayjob-annotated.yaml for why
+  # (KubeRay forbids it outright in clusterSelector mode).

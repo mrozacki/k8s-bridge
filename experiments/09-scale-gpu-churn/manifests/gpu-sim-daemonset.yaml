@@ -1,0 +1,138 @@
+# Simulated-GPU device "plugin" (ADR-0010, mechanism 1: "patch a node's
+# status with a fake extended resource, e.g. nvidia.com/gpu: N"). Live testing
+# validated this by hand with a `kubectl patch node .../status` loop; this
+# manifest promotes the same idea to a self-patching DaemonSet so it survives
+# GKE autoscaling adding/removing gpu-sim-spot nodes without a human re-running
+# a loop every time the pool resizes.
+#
+# Why a self-patching DaemonSet instead of a one-shot kubectl patch loop
+# (the other option the task asked us to evaluate):
+#   - The gpu-sim-spot pool autoscales 0..N (see 00-env.sh). A one-shot patch
+#     loop only covers nodes that exist AT THE MOMENT it runs; any node the
+#     autoscaler adds afterwards (very likely under a 3000-job backlog spike)
+#     would have no nvidia.com/gpu capacity and silently sit unusable until
+#     someone reran the loop. A DaemonSet's pod starts automatically on every
+#     new node (that's what a DaemonSet is for), so the patch is always
+#     applied within seconds of the node joining. This directly matches the
+#     task's steer ("a small daemonset that patches its own node's capacity
+#     is the robust choice").
+#   - It is idempotent by construction: the container just re-applies the
+#     same PATCH on a loop, so re-running it (or crash-looping) never
+#     compounds the value.
+#
+# The DaemonSet's own pod requests are tiny and it tolerates the gpu-sim taint
+# so it actually lands on the pool it is patching.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-sim-patcher
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-sim-patcher
+rules:
+  # Only the /status subresource is needed to add capacity/allocatable; no
+  # other node mutation is granted (least privilege, mirrors the bridge's own
+  # RBAC posture in deploy/chart/k8s-bridge/templates/rbac.yaml).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    # get is required: `kubectl patch --subresource=status` does a GET
+    # before the PATCH (found live).
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpu-sim-patcher
+subjects:
+  - kind: ServiceAccount
+    name: gpu-sim-patcher
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: gpu-sim-patcher
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gpu-sim-patcher
+  namespace: kube-system
+  labels:
+    app: gpu-sim-patcher
+spec:
+  selector:
+    matchLabels: { app: gpu-sim-patcher }
+  template:
+    metadata:
+      labels: { app: gpu-sim-patcher }
+    spec:
+      serviceAccountName: gpu-sim-patcher
+      # Only run on the GPU-sim pool — this DaemonSet must not try to patch
+      # the control-plane or churn pools with a fake GPU resource.
+      nodeSelector:
+        workload-mixing/gpu-sim: "true"
+      tolerations:
+        - key: workload-mixing/gpu-sim
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # Fine to evict under pressure; it re-patches on restart, and losing it
+      # briefly just means the node's advertised GPU capacity is stale, not
+      # wrong (Kubernetes does not claw back capacity already relied upon by
+      # running pods).
+      priorityClassName: system-node-critical
+      containers:
+        - name: patcher
+          # found live (2026-07-06): bitnami/kubectl:1.30 no
+          # longer resolves — Bitnami retired its general-purpose image
+          # catalog from Docker Hub in 2025, this tag included. Switched to
+          # rancher/kubectl:v1.30.0, a maintained, publicly pullable image
+          # pinned to the same kubectl minor version.
+          # rancher/kubectl is shell-less (no /bin/sh) so the shell patch
+          # loop below crashed with RunContainerError (found live).
+          # alpine/k8s bundles kubectl AND a shell.
+          image: alpine/k8s:1.30.3
+          # GPU_PER_NODE is baked in at apply time by 10-simulate-gpus.sh
+          # (envsubst) so this manifest and 00-env.sh's GPU_PER_NODE stay in
+          # sync without hand-editing YAML per run.
+          env:
+            - name: GPU_PER_NODE
+              value: "${GPU_PER_NODE}"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: GPU_RESOURCE_NAME
+              # Matches internal/config/config.go's
+              # Slurmd.GPUResourceName default ("nvidia.com/gpu") and
+              # ADR-0010's chosen resource name. Overridable if the bridge
+              # config's gpuResourceName is ever changed from the default.
+              value: "nvidia.com/gpu"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "gpu-sim-patcher starting on ${NODE_NAME}, advertising ${GPU_RESOURCE_NAME}=${GPU_PER_NODE}"
+              while true; do
+                kubectl patch node "${NODE_NAME}" --subresource=status --type=json \
+                  -p "[
+                    {\"op\":\"add\",\"path\":\"/status/capacity/${GPU_RESOURCE_NAME//\//~1}\",\"value\":\"${GPU_PER_NODE}\"},
+                    {\"op\":\"add\",\"path\":\"/status/allocatable/${GPU_RESOURCE_NAME//\//~1}\",\"value\":\"${GPU_PER_NODE}\"}
+                  ]" >/dev/null 2>&1 || echo "patch failed (will retry): $(date)"
+                sleep 30
+              done
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            capabilities: { drop: ["ALL"] }
+      terminationGracePeriodSeconds: 5

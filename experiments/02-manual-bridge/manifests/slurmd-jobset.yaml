@@ -1,0 +1,86 @@
+# The core k8s-bridge mechanism, written by hand.
+#
+# This JobSet is what the future controller will generate for one Slurm job:
+# N pods running slurmd that register as DYNAMIC NODES in the Slurm cluster,
+# tagged with a Feature unique to that job ("nodes-for-<slurm-job-id>").
+# Kueue admits the JobSet like any other workload — that is how a Slurm job
+# competes for quota with Ray and K8s batch.
+#
+# PLACEHOLDERS to resolve live against the environment from experiment 01
+# (marked TODO(live)): image tag, slurmctld address, auth key secret name.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: slurm-job-9001 # convention: slurm-job-<slurm-job-id>
+  namespace: slurm-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: main
+    kueue.x-k8s.io/priority-class: normal-priority
+    experiments.k8s-bridge/managed-by: manual # the controller will use its own label
+    experiments.k8s-bridge/slurm-job-id: "9001"
+spec:
+  # Do not mark the JobSet ready until every slurmd registered — the manual
+  # equivalent of gang semantics the bridge needs (WaitForPodsReady in Kueue).
+  startupPolicy:
+    startupPolicyOrder: AnyOrder
+  failurePolicy:
+    maxRestarts: 2 # a pod failure restarts the whole replicated job → Slurm requeues
+  replicatedJobs:
+    - name: workers
+      replicas: 1
+      template:
+        spec:
+          parallelism: 2 # == Slurm --ntasks for this simulation
+          completions: 2
+          backoffLimit: 0
+          template:
+            metadata:
+              labels:
+                experiments.k8s-bridge/slurm-job-id: "9001"
+            spec:
+              restartPolicy: Never
+              containers:
+                - name: slurmd
+                  # Tag matches the installed slurm chart (26.05, verified via
+                  # `helm show values` 2026-07-04).
+                  image: ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04
+                  # slurmd needs writable cgroups; without privileged it dies
+                  # with "unable to create cgroup: read-only file system".
+                  # Mirrors the security context the slurm-operator gives its
+                  # own nodeset pods (verified live, 2026-07-04). Production
+                  # concern: rules out GKE Autopilot as-is.
+                  securityContext:
+                    privileged: true
+                    capabilities:
+                      add: ["BPF", "NET_ADMIN", "SYS_ADMIN", "SYS_NICE"]
+                  args:
+                    # -Z = register as a dynamic node; the Features entry ties
+                    # the node to its Slurm job so the scheduler places exactly
+                    # that job here and nothing else. NOTE: keyword is plural
+                    # "Features" (singular is rejected).
+                    - "-Z"
+                    - "--conf"
+                    - "Features=nodes-for-9001"
+                    - "--conf-server"
+                    - "slurm-controller.slurm.svc.cluster.local:6817"
+                  resources:
+                    requests:
+                      cpu: "1"       # == Slurm --cpus-per-task
+                      memory: 1Gi
+                    limits:
+                      cpu: "1"
+                      memory: 1Gi
+                  volumeMounts:
+                    - name: slurm-key
+                      mountPath: /etc/slurm/slurm.key
+                      subPath: slurm.key
+                      readOnly: true
+              volumes:
+                - name: slurm-key
+                  secret:
+                    # Secret created by the slurm chart (slurmKey.create=true);
+                    # name verified against chart defaults: slurm-auth-slurm.
+                    # NOTE: it lives in the `slurm` namespace — it must be
+                    # copied into this namespace (see README step 4).
+                    secretName: slurm-auth-slurm
+                    defaultMode: 0600

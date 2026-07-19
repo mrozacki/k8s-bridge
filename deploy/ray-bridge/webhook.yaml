@@ -1,0 +1,62 @@
+# DEPRECATED: superseded by deploy/chart/ray-bridge's
+# templates/mutatingwebhookconfiguration.yaml + templates/webhook-service.yaml
+# + templates/certificate.yaml (gated by values webhook.enabled /
+# webhook.certManager.enabled), which additionally namespace-parameterize
+# every reference below instead of hardcoding namespace `ray`, and provision
+# the serving cert via a self-signed cert-manager Issuer instead of assuming
+# one already exists. Use the chart for new installs; this file is NOT
+# actively maintained going forward and is kept only because some
+# experiments may still reference it directly.
+#
+# ray-bridge pin-injecting webhook (optional, deployed separately from the core
+# controller because it needs a serving certificate).
+#
+# This MutatingWebhookConfiguration injects the admission-gate pin into every
+# inner RayJob at CREATE time — it patches spec.entrypointResources with
+# {"wm-job-<name>": 1} (merging any existing resources) so the RayJob's driver
+# cannot be scheduled until a Kueue-admitted dedicated worker advertises that
+# resource (the pin-gate model, ADR-0013). It does NOT patch spec.suspend:
+# KubeRay forbids suspend in clusterSelector mode (live finding), which is why
+# the pin, not a hold, is the gate. The webhook also DENIES inner RayJobs that
+# target a managed cluster with an unmapped / missing pool annotation, or a
+# malformed worker-shape annotation, so the error surfaces at submit time.
+#
+# Prerequisites:
+#   1. cert-manager installed (for the CA-injection annotation below), OR a
+#      manually provisioned serving cert mounted into the ray-bridge pod.
+#   2. ray-bridge started with --enable-webhook (calls
+#      raywebhook.Handler.SetupWithManager; the manager serves :9443).
+#   3. A Service `ray-bridge-webhook` in namespace `ray` fronting that port.
+#
+# failurePolicy is Ignore (not Fail) on purpose for the prototype: a webhook
+# outage must not block RayJob submission cluster-wide. Tighten to Fail once the
+# webhook is proven highly available.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: ray-bridge-auto-suspend
+  annotations:
+    cert-manager.io/inject-ca-from: ray/ray-bridge-serving-cert
+webhooks:
+  - name: auto-suspend.ray-bridge.x-k8s.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    clientConfig:
+      service:
+        name: ray-bridge-webhook
+        namespace: ray
+        path: /mutate-ray-io-v1-rayjob
+        port: 443
+    rules:
+      - apiGroups: ["ray.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["rayjobs"]
+        scope: Namespaced
+    # Only intercept RayJobs in namespaces the bridge manages (label your
+    # managed namespaces accordingly).
+    namespaceSelector:
+      matchLabels:
+        ray-bridge.x-k8s.io/managed: "true"

@@ -1,0 +1,13 @@
+apiVersion: v2
+name: k8s-bridge
+description: Kueue-centric workload-mixing bridge for Slurm on Kubernetes
+type: application
+version: 0.3.0
+appVersion: "v0.2.0"
+# Floor picked conservatively for Kueue's Topology-Aware-Scheduling feature
+# (config.topology / TAS, exercised by this chart) and JobSet, neither of
+# which this repo has pinned to an exact minimum tested Kubernetes version.
+# NOT independently verified against a live cluster below 1.29 — ratify (or
+# lower) this once that's been checked against the actual Kueue/JobSet
+# versions this project deploys (see docs/reference and experiments/10-*).
+kubeVersion: ">= 1.29.0-0"

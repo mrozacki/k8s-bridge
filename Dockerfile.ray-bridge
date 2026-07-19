@@ -1,0 +1,21 @@
+# Multi-stage build for the ray-bridge controller (sibling to k8s-bridge,
+# ADR-0012 — separate binary, separate image, shares the internal library).
+# Build context is this directory (.).
+FROM golang:1.26 AS build
+WORKDIR /src
+
+# Cache module downloads separately from source changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# CGO_ENABLED=0 static binary for the distroless/static base; -trimpath keeps
+# build-machine paths out of the binary. Same conventions as the k8s-bridge
+# image.
+RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -o /out/ray-bridge ./cmd/ray-bridge
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/ray-bridge /ray-bridge
+
+ENTRYPOINT ["/ray-bridge"]

@@ -1,0 +1,55 @@
+# Scenario A: a 2-pod gang that MUST land inside one rack.
+# Kueue TAS picks a rack with capacity for both pods and pins each pod to
+# nodes of that rack via injected selectors (watch: kubectl get pods -o wide).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: tas-rack-
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: topo
+spec:
+  parallelism: 2
+  completions: 2
+  suspend: true
+  template:
+    metadata:
+      annotations:
+        kueue.x-k8s.io/podset-required-topology: "example.com/rack"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: busybox:1.36
+          command: ["sh", "-c", "echo rack-gang on $(hostname); sleep 90"]
+          resources:
+            requests: { cpu: "1", memory: 1Gi }
+            limits: { cpu: "1", memory: 1Gi }
+---
+# Scenario C (negative): a 4-pod gang that CANNOT fit in any single rack
+# (each simulated rack has one 4-vCPU node => ~3.5 CPU allocatable).
+# Expected: workload stays inadmissible with a TAS topology message.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: tas-toobig-
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: topo
+spec:
+  parallelism: 4
+  completions: 4
+  suspend: true
+  template:
+    metadata:
+      annotations:
+        kueue.x-k8s.io/podset-required-topology: "example.com/rack"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 60"]
+          resources:
+            requests: { cpu: "2", memory: 1Gi }
+            limits: { cpu: "2", memory: 1Gi }

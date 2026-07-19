@@ -1,0 +1,27 @@
+# Experiment 04: serving through Kueue (ADR-0007 two-tier model).
+# The queue-name label on the POD TEMPLATE makes every replica its own
+# Kueue Workload (deployment integration); high priority means a scale-up
+# preempts batch instead of waiting.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: queued-inference
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: queued-inference }
+  template:
+    metadata:
+      labels:
+        app: queued-inference
+        kueue.x-k8s.io/queue-name: team-a
+        kueue.x-k8s.io/priority-class: high-priority
+    spec:
+      containers:
+        - name: server
+          image: ealen/echo-server:0.9.2
+          ports: [{ containerPort: 80 }]
+          resources:
+            requests: { cpu: "2", memory: 1Gi }
+            limits: { cpu: "2", memory: 1Gi }

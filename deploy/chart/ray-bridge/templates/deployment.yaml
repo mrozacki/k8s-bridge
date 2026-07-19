@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ray-bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ray-bridge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas | default 1 }}
+  # Recreate (L9 fix): with leader election on a single-replica controller, a
+  # RollingUpdate deadlocks — the old pod keeps renewing its Lease while Running,
+  # so the new pod never wins leadership, never becomes Ready, and the rollout
+  # never completes. Recreate stops the old pod first; a brief controller gap is
+  # safe (new RayJobs simply stay suspended until the bridge is back).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ray-bridge.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the Deployment when the rendered config changes. Hashes the
+        # rendered ConfigMap template (not just .Values.config directly) to
+        # match k8s-bridge's chart — the rendered output is what the pod
+        # actually mounts, so this also catches changes coming from the
+        # template itself, not only from values.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ray-bridge.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ray-bridge.fullname" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ray-bridge
+          image: {{ include "ray-bridge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/ray-bridge/config.yaml
+            - --leader-elect={{ .Values.leaderElect }}
+            - --leader-lease-duration={{ .Values.leaseDurationSeconds }}s
+            - --leader-renew-deadline={{ .Values.renewDeadlineSeconds }}s
+            {{- if .Values.allowedWorkerImages }}
+            - --allowed-worker-images={{ join "," .Values.allowedWorkerImages }}
+            {{- end }}
+            {{- if .Values.webhook.enabled }}
+            - --enable-webhook
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+            {{- if .Values.webhook.enabled }}
+            - name: webhook
+              containerPort: 9443
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ray-bridge
+              readOnly: true
+            {{- if .Values.webhook.enabled }}
+            # controller-runtime's webhook server reads tls.crt/tls.key from
+            # its default cert dir; this Secret is populated by
+            # templates/certificate.yaml (cert-manager) when
+            # webhook.certManager.enabled=true, or must be supplied manually
+            # at the same name (see ray-bridge.webhookCertSecretName in
+            # _helpers.tpl) when it's false.
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "ray-bridge.fullname" . }}-config
+        {{- if .Values.webhook.enabled }}
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "ray-bridge.webhookCertSecretName" . }}
+        {{- end }}

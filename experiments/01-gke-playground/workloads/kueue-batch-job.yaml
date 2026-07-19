@@ -1,0 +1,29 @@
+# Plain Kubernetes batch Job admitted by Kueue.
+# The queue-name label is what routes it through Kueue instead of running
+# immediately; Kueue flips `suspend` off once quota is available.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: sample-batch-
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: main
+    kueue.x-k8s.io/priority-class: normal-priority
+spec:
+  parallelism: 2
+  completions: 2
+  suspend: true # Kueue requires jobs to start suspended
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: busybox:1.36
+          command: ["sh", "-c", "echo simulating batch work on $(hostname); sleep 120"]
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi

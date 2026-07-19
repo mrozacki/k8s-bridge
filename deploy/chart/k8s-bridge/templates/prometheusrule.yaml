@@ -1,0 +1,142 @@
+{{- /*
+Requires the prometheus-operator CRDs (monitoring.coreos.com/v1), same as
+templates/servicemonitor.yaml — see that file's header comment.
+
+Translates the 7 alerts described in prose in docs/operations.md ("Alerts
+(minimum viable set)") into PrometheusRule alerting rules, at the thresholds
+that doc prescribes (values.yaml's prometheusRule.rules.* is the
+single source of truth for those thresholds; keep the two in sync if you
+change one).
+
+IMPORTANT — three of these seven rules query metrics this chart does not
+ship an exporter for (a Slurm node-state exporter for rule 3, kube-state-metrics
+for rules 4 and 5). They are included because docs/operations.md describes
+all seven as one set, but they will simply never fire (not "fail alerting",
+just permanently absent series) until the corresponding exporter is scraped
+into the same Prometheus. Each rule below says exactly what it needs.
+*/}}
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "k8s-bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ include "k8s-bridge.fullname" . }}.rules
+      rules:
+        # Alert 1 (docs/operations.md #1): bridge tick failures > 3
+        # consecutive — usually the Slurm URL is unreachable or the JWT
+        # token expired. "Consecutive" is approximated here as >=3 failed
+        # ticks inside a short window; the default window assumes the
+        # default 10s pollInterval, widen prometheusRule.rules.tickFailures.window
+        # if you raised config.pollInterval well beyond that.
+        - alert: K8sBridgeTickFailuresHigh
+          expr: increase(k8s_bridge_tick_errors_total[{{ .Values.prometheusRule.rules.tickFailures.window | default "2m" }}]) >= 3
+          for: {{ .Values.prometheusRule.rules.tickFailures.for | default "0m" }}
+          labels:
+            severity: {{ .Values.prometheusRule.rules.tickFailures.severity | default "critical" }}
+          annotations:
+            summary: k8s-bridge is failing repeated reconcile ticks.
+            description: >-
+              {{ "{{ $labels.instance }}" }} has recorded >=3 failed ticks in the
+              last {{ .Values.prometheusRule.rules.tickFailures.window | default "2m" }}.
+              Check slurmrestd reachability and JWT token expiry first — see
+              docs/operations.md "Token expiry" runbook.
+        # Alert 2 (#2): a Workload pending > 30 min with QuotaReserved=False
+        # in a mixing queue (capacity starvation or a misconfigured quota —
+        # remember the GPU-not-covered incident). APPROXIMATION: Kueue does
+        # not (v0.18) expose a metric split specifically by the
+        # QuotaReserved condition, so this alerts on sustained
+        # kueue_pending_workloads instead of the exact condition. Requires
+        # Kueue's own ServiceMonitor (deploy/monitoring/kueue-servicemonitor.yaml)
+        # to be scraping the same Prometheus.
+        - alert: K8sBridgeWorkloadPendingTooLong
+          expr: kueue_pending_workloads > 0
+          for: {{ .Values.prometheusRule.rules.workloadPendingQuotaReserved.for | default "30m" }}
+          labels:
+            severity: {{ .Values.prometheusRule.rules.workloadPendingQuotaReserved.severity | default "warning" }}
+          annotations:
+            summary: A Kueue Workload has been pending for a long time.
+            description: >-
+              kueue_pending_workloads has been > 0 for at least
+              {{ .Values.prometheusRule.rules.workloadPendingQuotaReserved.for | default "30m" }}
+              in queue {{ "{{ $labels.queue_name }}" }} — likely capacity
+              starvation or a misconfigured quota (e.g. a GPU flavor not
+              covered by any ResourceFlavor).
+        # Alert 3 (#3): a dynamic node in DOWN state > 5 min (ReturnToService
+        # misconfig regression). REQUIRES a Slurm Prometheus exporter (e.g.
+        # slinkyproject's or prometheus-slurm-exporter) scraped into the same
+        # Prometheus — this chart ships none. `slurm_node_state` below is
+        # illustrative; adjust to match whatever exporter you actually run.
+        - alert: K8sBridgeSlurmNodeDown
+          expr: slurm_node_state{state="down"} == 1
+          for: {{ .Values.prometheusRule.rules.dynamicNodeDown.for | default "5m" }}
+          labels:
+            severity: {{ .Values.prometheusRule.rules.dynamicNodeDown.severity | default "warning" }}
+          annotations:
+            summary: A dynamic Slurm node has been DOWN for too long.
+            description: >-
+              Node {{ "{{ $labels.node }}" }} has been reported DOWN for at
+              least {{ .Values.prometheusRule.rules.dynamicNodeDown.for | default "5m" }}
+              — check ReturnToService=2 is set; see docs/operations.md.
+        # Alert 4 (#4): slurm-controller-0 / kueue-controller-manager not
+        # Ready. REQUIRES kube-state-metrics in the same Prometheus.
+        - alert: K8sBridgeControlPlaneNotReady
+          expr: kube_pod_status_ready{condition="true", pod=~"slurm-controller-0|kueue-controller-manager.*"} == 0
+          for: {{ .Values.prometheusRule.rules.controlPlaneNotReady.for | default "5m" }}
+          labels:
+            severity: {{ .Values.prometheusRule.rules.controlPlaneNotReady.severity | default "critical" }}
+          annotations:
+            summary: A control-plane component the bridge depends on is not Ready.
+            description: >-
+              Pod {{ "{{ $labels.pod }}" }} in namespace
+              {{ "{{ $labels.namespace }}" }} has not reported Ready for at
+              least {{ .Values.prometheusRule.rules.controlPlaneNotReady.for | default "5m" }}.
+        # Alert 5 (#5): RayCluster head pod restart (SPOF — kills every
+        # in-cluster Ray job on that cluster). REQUIRES kube-state-metrics.
+        - alert: K8sBridgeRayHeadPodRestarted
+          expr: increase(kube_pod_container_status_restarts_total{pod=~".*-head.*"}[{{ .Values.prometheusRule.rules.rayHeadRestart.window | default "15m" }}]) > 0
+          labels:
+            severity: {{ .Values.prometheusRule.rules.rayHeadRestart.severity | default "warning" }}
+          annotations:
+            summary: A RayCluster head pod restarted.
+            description: >-
+              Head pod {{ "{{ $labels.pod }}" }} restarted in the last
+              {{ .Values.prometheusRule.rules.rayHeadRestart.window | default "15m" }}
+              — this is a single point of failure for every in-cluster Ray
+              job on that cluster.
+        # Alert 6 (#6): k8s_bridge_jobs_failed_total increasing (D1 — a
+        # JobSet died before its Slurm job ran).
+        - alert: K8sBridgeJobsFailedIncreasing
+          expr: increase(k8s_bridge_jobs_failed_total[{{ .Values.prometheusRule.rules.jobsFailedIncreasing.window | default "15m" }}]) > 0
+          labels:
+            severity: {{ .Values.prometheusRule.rules.jobsFailedIncreasing.severity | default "warning" }}
+          annotations:
+            summary: k8s-bridge has failed at least one Slurm job via a dead JobSet.
+            description: >-
+              k8s_bridge_jobs_failed_total increased in the last
+              {{ .Values.prometheusRule.rules.jobsFailedIncreasing.window | default "15m" }}
+              on {{ "{{ $labels.instance }}" }} — see docs/operations.md's D1 runbook
+              ("JobSet dead, Slurm job pending forever").
+        # Alert 7 (#7): leader_election_master_status == 0 on every replica
+        # simultaneously (no replica holds the Lease — the reconcile loop is
+        # not running at all). `max` collapses the per-replica series so the
+        # alert only fires when NONE of them report holding the Lease.
+        - alert: K8sBridgeLeaderElectionLost
+          expr: max(leader_election_master_status{job=~".*{{ include "k8s-bridge.name" . }}.*"}) == 0
+          for: {{ .Values.prometheusRule.rules.leaderElectionLost.for | default "2m" }}
+          labels:
+            severity: {{ .Values.prometheusRule.rules.leaderElectionLost.severity | default "critical" }}
+          annotations:
+            summary: No k8s-bridge replica holds the leader-election Lease.
+            description: >-
+              leader_election_master_status has been 0 across every replica
+              for at least {{ .Values.prometheusRule.rules.leaderElectionLost.for | default "2m" }}
+              — the reconcile loop is not running on any replica.
+{{- end }}

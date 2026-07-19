@@ -1,0 +1,168 @@
+# Auto-merge low-risk Dependabot updates once CI is green.
+#
+# Why this shape: the repo is private on a free GitHub plan, so branch
+# protection and GitHub's native auto-merge are unavailable. Instead of gating
+# on protection, this workflow reacts to the `ci` workflow *completing
+# successfully* on a Dependabot pull request and then merges it — but only for
+# patch/minor version bumps. Major bumps are left for a human to review.
+#
+# It runs via `workflow_run`, which executes in the context of the default
+# branch and therefore receives a normal (write-capable) GITHUB_TOKEN — unlike
+# a `pull_request` trigger from Dependabot, whose token is read-only.
+#
+# Three things this workflow is careful about, because it merges to the default
+# branch with no branch protection standing behind it:
+#
+#  1. It merges the EXACT commit CI validated (`--match-head-commit`). Dependabot
+#     rebases and force-pushes its branches; without this, a commit that landed
+#     after CI went green would be squash-merged unvalidated.
+#  2. It classifies the bump from Dependabot's own `update-type:` commit trailer,
+#     not from the PR title. Titles vary ("Bump x from 4 to 5" has no patch
+#     component), and a title regex fails closed — the feature looks enabled
+#     while never merging anything. A grouped update carries one trailer per
+#     bumped dependency; every one of them must be patch/minor.
+#  3. `ci` succeeding is the trigger, not the whole gate. Other checks (notably
+#     `dco`) run on the same commit and must have completed with a passing
+#     conclusion — a check-run that's missing, renamed, or still in progress
+#     is treated as blocking, not as "nothing to complain about".
+name: dependabot-auto-merge
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One merge attempt per head commit: two `ci` runs finishing together would
+# otherwise race, and the loser fails noisily on an already-merged PR.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    # Only act on a *successful* CI run triggered by a Dependabot PR that
+    # originated in this repository (never a fork).
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    steps:
+      - name: Resolve the PR this CI run belongs to
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --repo "$REPO" --state open \
+            --json number,headRefOid \
+            --jq "map(select(.headRefOid == \"$HEAD_SHA\")) | .[0].number // empty")
+          if [ -z "$number" ]; then
+            echo "No open PR at $HEAD_SHA (already merged, or force-pushed since) — nothing to do."
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm no other check on this commit failed
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # `ci` passing is what woke us up, but it is not the only gate on this
+          # commit: `dco` runs separately and, with no branch protection, nothing
+          # else would stop a merge if it had failed.
+          runs=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+            --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "")"')
+          echo "$runs"
+
+          # Block on two kinds of check-run: (a) anything that hasn't
+          # completed yet (status != completed — queued/in_progress), because
+          # its outcome is still unknown and a check that finishes AFTER we
+          # merge is a check we never actually gated on; and (b) anything
+          # completed with a non-pass conclusion. A previous version of this
+          # scan only matched (b), so a check-run still `in_progress` (empty
+          # conclusion, matches none of the failure states) silently failed
+          # to block — fixed here to fail closed instead.
+          blocking=$(printf '%s\n' "$runs" \
+            | awk -F'\t' '$2 != "completed" || $3 == "failure" || $3 == "timed_out" || $3 == "cancelled" || $3 == "action_required"' || true)
+          if [ -n "$blocking" ]; then
+            echo "::error::another check on $HEAD_SHA is still running or did not succeed — refusing to merge:"
+            printf '%s\n' "$blocking"
+            exit 1
+          fi
+
+          # DCO must have completed with a success conclusion. The previous
+          # form here — `[ -n "$dco" ] && [ "$dco" != "success" ]` — only
+          # caught an explicit non-success conclusion; when $dco was EMPTY
+          # (the "DCO sign-off check" run missing entirely, e.g. renamed, or
+          # still in progress with no conclusion yet) the condition was
+          # false and the check was silently treated as fine. Fail closed:
+          # require it present AND successful.
+          dco=$(printf '%s\n' "$runs" | awk -F'\t' '$1 == "DCO sign-off check" {print $3}' | head -1)
+          if [ -z "$dco" ] || [ "$dco" != "success" ]; then
+            echo "::error::DCO check-run is missing or not successful (got: '${dco:-<not found>}') — refusing to merge."
+            exit 1
+          fi
+
+      - name: Classify the bump from Dependabot's update-type trailer
+        id: classify
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          # Dependabot stamps a machine-readable trailer into every commit it
+          # writes, e.g. "update-type: version-update:semver-patch". A grouped
+          # update carries one trailer per bumped dependency, so read them all.
+          message=$(gh api "repos/$REPO/pulls/$PR/commits" --jq '.[-1].commit.message')
+          types=$(printf '%s\n' "$message" | sed -n 's/.*update-type: version-update:semver-\([a-z]*\).*/\1/p')
+
+          if [ -z "$types" ]; then
+            echo "No update-type trailer found — cannot classify, leaving for human review."
+            echo "merge=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "update types found:"
+          printf '%s\n' "$types" | sed 's/^/  /'
+
+          # Explicit line loop rather than unquoted word splitting: one trailer
+          # per line, and no dependence on IFS.
+          while IFS= read -r t; do
+            [ -n "$t" ] || continue
+            case "$t" in
+              patch|minor) ;;
+              *)
+                echo "Bump type '$t' is not patch/minor — leaving for human review."
+                echo "merge=false" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+          done <<< "$types"
+
+          echo "All bumps are patch/minor with green CI — merging."
+          echo "merge=true" >> "$GITHUB_OUTPUT"
+
+      - name: Merge the exact commit CI validated
+        if: steps.pr.outputs.number != '' && steps.classify.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # --match-head-commit makes the merge fail rather than silently land a
+          # commit CI never saw, should Dependabot have force-pushed in between.
+          gh pr merge "$PR" --repo "$REPO" --squash \
+            --match-head-commit "$HEAD_SHA" --delete-branch

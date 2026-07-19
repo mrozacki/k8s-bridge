@@ -1,0 +1,101 @@
+image:
+  # Published by .github/workflows/release.yaml on every vX.Y.Z tag; the
+  # registry location is a revisit-before-GA decision per that workflow.
+  repository: ghcr.io/mrozacki/k8s-bridge/ray-bridge
+  tag: "" # defaults to .Chart.AppVersion when empty
+  digest: "" # e.g. sha256:...; wins over tag when set
+  pullPolicy: IfNotPresent
+
+# Placed on the ServiceAccount (templates/serviceaccount.yaml), matching
+# k8s-bridge's chart, rather than directly on the pod spec — kubelet resolves
+# imagePullSecrets from the ServiceAccount automatically, so there is no
+# functional difference; this is purely a cross-chart consistency choice.
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Controller-level trust anchor (security C1 analog): only images whose ref
+# starts with one of these prefixes may run as the Ray worker. Empty disables
+# the check (the controller logs a warning).
+allowedWorkerImages:
+  - "rayproject/"
+
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { cpu: 200m, memory: 128Mi }
+
+# replicas: Deployment replica count. Named to match k8s-bridge's chart
+# (which uses `replicas`, not `replicaCount`) for cross-chart consistency —
+# this value used to be read via `.Values.replicaCount | default 1` with no
+# declared key at all, so the knob was undocumented and un-discoverable via
+# `helm show values`. Only useful above 1 when leaderElect is on (the
+# default): extra replicas sit idle until they win the Lease.
+replicas: 1
+
+# Standard Helm scheduling/customization knobs for the controller pod, mirrored
+# from k8s-bridge's chart. All empty/off by default.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Extra annotations/labels merged onto the pod template (NOT the Deployment
+# object itself).
+podAnnotations: {}
+podLabels: {}
+
+# leader election (ADR-0011): a Lease so a second replica sits idle instead of
+# double-reconciling. leaseDurationSeconds/renewDeadlineSeconds are kept short
+# so a rolling upgrade hands leadership over quickly (L9 fix).
+leaderElect: true
+leaseDurationSeconds: 15
+renewDeadlineSeconds: 10
+
+# The auto-suspend admission webhook: without it, inner RayJobs are only
+# gated on Kueue admission if THEY set spec.entrypointResources themselves —
+# nothing stops a submitter from omitting it and running unpinned, straight
+# past ray-bridge/Kueue entirely (see deploy/chart/ray-bridge/README.md's
+# warning). Off by default: it needs a serving certificate and a
+# MutatingWebhookConfiguration, which is why enabling it renders three more
+# objects (Service, MutatingWebhookConfiguration, and — unless
+# certManager.enabled=false — a cert-manager Issuer+Certificate). See
+# templates/webhook-service.yaml, templates/mutatingwebhookconfiguration.yaml,
+# templates/certificate.yaml.
+webhook:
+  enabled: false
+  # cert-manager Issuer (self-signed) + Certificate for the webhook's serving
+  # cert. Defaults to true whenever webhook.enabled=true, since that's the
+  # only supported automatic path this chart ships. Set false if you
+  # provision the <fullname>-webhook-tls Secret (tls.crt/tls.key) yourself —
+  # e.g. no cert-manager in this cluster — and this chart will still render
+  # the Service/MutatingWebhookConfiguration and mount whatever Secret is
+  # there, but will not create the Issuer/Certificate objects.
+  certManager:
+    enabled: true
+  # failurePolicy is Ignore (not Fail) on purpose for the prototype: a
+  # webhook outage must not block RayJob submission cluster-wide. Tighten to
+  # Fail once the webhook is proven highly available (matches the rationale
+  # already documented in deploy/ray-bridge/webhook.yaml).
+  failurePolicy: Ignore
+
+# RBAC: namespaced Role/RoleBinding (the controller's cache is namespace-scoped).
+rbac:
+  create: true
+
+# ray-bridge configuration, rendered into a ConfigMap and mounted at
+# /etc/ray-bridge/config.yaml. Mirrors internal/rayconfig.Config.
+config:
+  namespace: ray
+  localQueue: ray-main
+  managedClusters:
+    - name: shared-cluster
+      headAddress: shared-cluster-head-svc.ray:6379
+  poolMappings:
+    - pool: batch
+      workloadPriorityClass: normal-priority
+    - pool: interactive
+      workloadPriorityClass: high-priority
+  worker:
+    image: rayproject/ray:2.9.0
+    gpuResourceName: nvidia.com/gpu
+    defaultWorkers: 1
+    defaultCpus: 1
+    defaultMemoryMB: 1024

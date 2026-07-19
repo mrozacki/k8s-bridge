@@ -1,0 +1,35 @@
+# Long-lived SHARED RayCluster — deliberately NOT queued through Kueue
+# (no queue-name label). Per ADR-0006 the cluster is infrastructure; what
+# should be admitted are the workloads submitted INTO it.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: shared-ray
+  namespace: default
+spec:
+  rayVersion: "2.46.0"
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: rayproject/ray:2.46.0
+            resources:
+              requests: { cpu: "1", memory: 2Gi }
+              limits: { cpu: "1", memory: 2Gi }
+  workerGroupSpecs:
+    - groupName: base
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: rayproject/ray:2.46.0
+              resources:
+                requests: { cpu: "1", memory: 2Gi }
+                limits: { cpu: "1", memory: 2Gi }

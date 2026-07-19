@@ -1,0 +1,77 @@
+# Example k8s-bridge configuration. Mirrors the future WorkloadMixing CR
+# (see ADR-0004) — values below match the experiment 01/02 environment.
+#
+# Use https so the bearer-equivalent Slurm token is not sent in cleartext. A
+# plaintext http:// URL is rejected unless allowInsecureHTTP: true is set (local
+# development only). slurmCACertFile points at the PEM bundle verifying the
+# slurmrestd certificate; omit it to use the system roots.
+slurmRestURL: "https://slurm-restapi.slurm.svc.cluster.local:6820"
+# allowInsecureHTTP: true
+# slurmCACertFile: "/var/run/secrets/slurm/ca.crt"
+slurmTokenFile: "/var/run/secrets/slurm/token" # JWT for slurmrestd
+slurmUser: "" # empty = use the token's own user (safe). MUST be a REAL Slurm user if set — a fake name 422s every job update (found in e2e testing)
+# maxUserPriority caps user-originated priority requests (security audit H1).
+maxUserPriority: 10000
+# createWorkers bounds the worker pool used to parallelize JobSet creation
+# across held jobs (P5: sequential creates dominated the first tick of a
+# burst). Defaults to 8 when omitted; the shared, rate-limited Kubernetes
+# client (QPS/Burst in main.go) still bounds actual throughput regardless of
+# how high this is set.
+# createWorkers: 8
+# enablePrioritySync gates the EXPERIMENTAL Slurm<->Workload priority field
+# mirror. Default off, and should stay off: live testing showed Slurm
+# recomputes the field and treats 0 as hold (ADR-0009) — the mirror re-held
+# a running job. The supported mutation channel is the lua admin_comment
+# directive (`wm:prio=N`) or a direct `kubectl patch workload`.
+# enablePrioritySync: false
+
+namespace: "slurm-jobs"   # where slurmd JobSets are created
+localQueue: "main"        # Kueue LocalQueue in that namespace
+
+partitionMappings:
+  - partitionName: "mixing"
+    workloadPriorityClass: "normal-priority"
+  - partitionName: "mixing-high"
+    workloadPriorityClass: "high-priority"
+  # localQueue (backlog A1b) overrides the top-level localQueue above for
+  # JobSets translated from THIS partition only — multi-team support, e.g.
+  # routing one team's partition to its own Kueue LocalQueue/quota. Omit to
+  # fall back to the global localQueue, exactly like "mixing" above.
+  # - partitionName: "team-a"
+  #   workloadPriorityClass: "normal-priority"
+  #   localQueue: "team-a-queue"
+
+slurmd:
+  image: "ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04" # matches installed chart
+  confServer: "slurm-controller.slurm.svc.cluster.local:6817" # verify service name live
+  authSecretName: "slurm-auth-slurm" # chart default (slurmKey secret)
+  # gpuResourceName: the Kubernetes extended resource requested when a Slurm
+  # job asks for GRES GPUs. Defaults to "nvidia.com/gpu" if omitted.
+  # gpuResourceName: "nvidia.com/gpu"
+  # sharedStorage: mounts an NFS export (e.g. /home) into every slurmd pod so
+  # job scripts and data resolve like on a static cluster (validated live).
+  # sharedStorage:
+  #   nfsServer: "nfs-server.default.svc.cluster.local"
+  #   nfsPath: "/export/home"
+  #   mountPath: "/home"
+
+# Topology-aware scheduling (ADR-0008): node label keys registered as levels
+# in the cluster's Topology CR. Omit the section to disable translation.
+topology:
+  requiredLevel: "example.com/rack"   # applied when sbatch used --switches
+  preferredLevel: "example.com/block" # best-effort default for other jobs
+
+pollInterval: 10s
+
+# Per-request slurmrestd HTTP timeout (default 30s, bounds 1s..10m). The
+# GET /jobs payload grows with total queue depth (no server-side paging in
+# v0.0.44) — raise this for deliberately large backlogs. Read at startup only.
+# slurmRequestTimeout: 30s
+
+# Client-side rate limit on ALL bridge requests to slurmrestd, in requests
+# per second (bounds 0..10000). 0 or omitted = unlimited (the historic
+# behavior). slurmrestd was the fragile dependency in scale testing — it
+# shares slurmctld's lock and has no throttling of its own — so set this on
+# any deployment where an unpaced bridge burst could starve the scheduler.
+# Burst is derived as 2x the rate (minimum 1). Read at startup only.
+# slurmRequestsPerSecond: 100

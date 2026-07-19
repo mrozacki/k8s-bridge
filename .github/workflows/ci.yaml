@@ -1,0 +1,217 @@
+name: ci
+
+# The deploy/crd and chart crds/ paths are included (ADR-0014) so a hand-edit
+# of a generated CRD copy that touches nothing under prototype/ still triggers
+# the manifests-drift job below and gets rejected.
+on:
+  push:
+    branches: [main]
+    paths:
+      [
+        "prototype/**",
+        "deploy/crd/**",
+        "deploy/chart/k8s-bridge/crds/**",
+        ".github/workflows/ci.yaml",
+      ]
+  pull_request:
+    paths:
+      [
+        "prototype/**",
+        "deploy/crd/**",
+        "deploy/chart/k8s-bridge/crds/**",
+        ".github/workflows/ci.yaml",
+      ]
+
+# Least privilege: the default GITHUB_TOKEN grants write scopes this pipeline
+# does not need. Read-only is enough for build/test/lint; individual jobs raise
+# their own scopes if ever required.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: .
+
+jobs:
+  unit:
+    name: fmt / vet / unit tests
+    runs-on: ubuntu-latest
+    steps:
+      # SEC3 (SHA-pin GitHub Actions): actions are pinned to full commit SHAs,
+      # not floating version tags, for OpenSSF Scorecard "Pinned-Dependencies".
+      # The trailing comment records the human-readable version the SHA
+      # corresponds to; Dependabot (.github/dependabot.yml) bumps the SHA and
+      # preserves that comment on each update.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: gofmt (fail on diff)
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: go vet
+        run: go vet ./...
+      - name: thin-surface guard (WAS readiness, ADR audit D1)
+        run: ./scripts/verify-thin-surface.sh
+      - name: benchmarks (smoke)
+        run: go test -bench=. -benchtime=100x -run=NoTests ./internal/translate/
+      # Benchmark regression gate (backlog AUD5), upgraded from the smoke
+      # step above. Design choice: GitHub-hosted runners are shared,
+      # variable-noise hardware — a naive "fail if slower than baseline.txt"
+      # gate would flap constantly on unrelated PRs. So this step is
+      # ADVISORY by default (prints the benchstat comparison + a step
+      # summary, fails nothing) up to a generous 30% geomean/per-benchmark
+      # regression, and only HARD FAILS above a 2x (200%) slowdown — the
+      # kind of regression no runner noise plausibly explains. If this
+      # proves too loose in practice, tighten FAIL_PCT down; if it still
+      # flakes at 200%, that says more about runner variance than the code
+      # and the right fix is a bigger benchtime/count, not a lower bar.
+      - name: benchmarks (regression check vs test/bench-baseline.txt)
+        run: |
+          go test -bench=. -benchtime=1000x -count=6 -run=NoTests ./internal/translate/... > /tmp/bench-after.txt
+          go test -bench=BenchmarkTick -benchtime=1000x -count=6 -run=NoTests ./internal/bridge/... >> /tmp/bench-after.txt
+          go run golang.org/x/perf/cmd/benchstat@latest test/bench-baseline.txt /tmp/bench-after.txt | tee /tmp/bench-compare.txt
+
+          {
+            echo "### Benchmark comparison vs test/bench-baseline.txt"
+            echo '```'
+            cat /tmp/bench-compare.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          WARN_PCT=30
+          FAIL_PCT=200
+          # Every statistically-significant delta benchstat prints looks like
+          # "+12.34%" or "-5.67%"; "~" (not significant) rows contribute no
+          # match and are correctly ignored. Taking the max signed value
+          # means only regressions (positive = slower), not improvements
+          # (negative = faster), can trip either threshold.
+          worst=$(grep -oE '[+-][0-9]+\.[0-9]+%' /tmp/bench-compare.txt | tr -d '%' | sort -n | tail -1 || true)
+          worst=${worst:-0}
+          echo "worst regression: ${worst}% (warn >${WARN_PCT}%, fail >${FAIL_PCT}%)"
+          if awk -v w="$worst" -v fail="$FAIL_PCT" 'BEGIN { exit !(w+0 > fail+0) }'; then
+            echo "::error::benchmark regression ${worst}% exceeds the hard-fail threshold of ${FAIL_PCT}% (2x) — see the step summary for the full benchstat comparison"
+            exit 1
+          fi
+          if awk -v w="$worst" -v warn="$WARN_PCT" 'BEGIN { exit !(w+0 > warn+0) }'; then
+            echo "::warning::benchmark regression ${worst}% exceeds the ${WARN_PCT}% advisory threshold but is below the ${FAIL_PCT}% hard-fail line — not failing the build (CI runners are noisy; see step summary)"
+          fi
+      - name: build
+        run: go build ./...
+      # -count=2 -shuffle=on (backlog AUD5): running the whole suite twice
+      # per package, in a randomized order each time, catches inter-test
+      # state dependence (e.g. a test that only passes because an earlier
+      # test happened to leave a package-level var in the right state) that
+      # a single ordered run cannot.
+      #
+      # -coverpkg=./... (backlog AUD5): without it, `go test ./...` scores
+      # each package's coverage only against statements IN THAT PACKAGE,
+      # understating packages that are mostly exercised indirectly through
+      # another package's tests (e.g. internal/bridge driving internal/slurm
+      # and internal/translate). -coverpkg=./... attributes every executed
+      # statement to the profile regardless of which package's test invoked
+      # it, giving one true whole-module number.
+      - name: unit tests (race + coverage, shuffled x2)
+        run: |
+          go test -race -count=2 -shuffle=on -coverpkg=./... -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
+      # Coverage ratchet (backlog AUD5). Floor convention: measured total
+      # coverage with this exact command, minus 1 point, to absorb normal
+      # measurement noise.
+      # RATCHET RULE: when total coverage rises, raise this floor to
+      # (new total - 1), rounded down to one decimal. NEVER lower it to make
+      # a regression pass — a real coverage drop must fail CI so the PR that
+      # caused it has to justify or fix it.
+      # RE-BASELINE LOG (documented exceptions to "never lower", per the rule's
+      # own "justify" clause):
+      #   2026-07-06a: 76.5% total, floor 75.5% (initial, backlog AUD5).
+      #   2026-07-06b: floor lowered to 73.5% after the ADR-0011 Manager +
+      #     watch-nudge refactor. That change ADDED ~100 lines of Manager
+      #     wiring to cmd/k8s-bridge/main.go which is inherently unit-untestable
+      #     (needs a live apiserver) and is instead exercised by the envtest
+      #     integration job (make test-integration, TestManagerWatchNudge* /
+      #     TestBridgeRunGatedByLeaderElection) — which the -coverpkg unit run
+      #     here does NOT include. So the total fell to 74.5% by ADDING
+      #     integration-covered code, not by losing coverage. internal/bridge
+      #     itself stayed ~90%. Follow-up (backlog AUD5): merge the integration
+      #     coverage profile into this measurement to restore a higher floor.
+      #   2026-07-12: generated code excluded from the measurement (ADR-0014
+      #     PR 1 added api/v1alpha1 with controller-gen's zz_generated
+      #     deepcopy — hundreds of tool-owned statements no unit test should
+      #     chase; including them dropped the total to 72.3% and tripped the
+      #     floor without any real coverage loss). Only *generated* files are
+      #     filtered; the hand-written api types stay in the measurement and
+      #     are exercised by the package's scheme/registration test.
+      - name: coverage ratchet (floor 73.5%, backlog AUD5)
+        run: |
+          grep -v "/zz_generated" coverage.out > coverage.ratchet.out
+          total=$(go tool cover -func=coverage.ratchet.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          floor="73.5"
+          echo "total coverage (generated files excluded): ${total}%  (floor: ${floor}%)"
+          awk -v total="$total" -v floor="$floor" 'BEGIN { exit !(total >= floor) }' \
+            || { echo "::error::coverage ${total}% dropped below the ratchet floor ${floor}% — see .github/workflows/ci.yaml coverage ratchet comment"; exit 1; }
+
+  lint:
+    name: golangci-lint (incl. gosec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          working-directory: .
+
+  vuln:
+    name: govulncheck (known CVEs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  # ADR-0014: the WorkloadMixing CRD is generated from the typed API in
+  # api/v1alpha1. This gate regenerates everything
+  # (deepcopy + all three CRD copies) and fails on any resulting diff, so a
+  # hand-edited copy, a stale zz_generated.deepcopy.go, or a marker change
+  # committed without `make manifests` cannot merge. Complements chart-ci's
+  # crd-sync-gate (which proves the three copies match EACH OTHER, this one
+  # proves they match the Go markers).
+  manifests-drift:
+    name: generated manifests drift gate (ADR-0014)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: make manifests && git diff --exit-code
+        run: |
+          make manifests
+          # git diff is repo-wide regardless of the working directory, so this
+          # also catches drift in deploy/crd and the chart's crds/ copy.
+          git diff --exit-code || {
+            echo "::error::generated files are stale or hand-edited — run 'make manifests' in . and commit the result"
+            exit 1
+          }
+
+  integration:
+    name: integration (envtest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: envtest suite (real kube-apiserver + JobSet CRD)
+        run: make test-integration

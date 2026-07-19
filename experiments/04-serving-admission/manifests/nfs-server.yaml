@@ -1,0 +1,46 @@
+# Minimal in-cluster NFS server providing the shared /home for slurmd pods
+# (phase A shared-storage validation). Production would use Filestore; the
+# bridge only needs AN nfs endpoint, which is the point of the demo.
+#
+# SECURITY (experiment-only): this runs a third-party, low-maintenance image as
+# a privileged container (NFS kernel server needs it). Acceptable for a
+# throwaway experiment cluster; do NOT promote this into the chart or any
+# default-on / production path. See the threat model (docs/reference/threat-model.md), item L3.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-server
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: nfs-server }
+  template:
+    metadata:
+      labels: { app: nfs-server }
+    spec:
+      containers:
+        - name: nfs
+          image: itsthenetwork/nfs-server-alpine:12
+          securityContext: { privileged: true }
+          env:
+            - name: SHARED_DIRECTORY
+              value: /exports
+          ports:
+            - containerPort: 2049
+          volumeMounts:
+            - name: exports
+              mountPath: /exports
+      volumes:
+        - name: exports
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nfs-server
+  namespace: default
+spec:
+  selector: { app: nfs-server }
+  ports:
+    - port: 2049

@@ -1,0 +1,30 @@
+# WorkloadMixing Fan-Out configuration for Scenario S4
+# A single WorkloadMixing CR mapping 10 Slurm partitions (fanout-1 through fanout-10) to one shared Kueue LocalQueue (gpu-queue).
+# Deploy k8s-bridge with: --workloadmixing slurm-jobs/wm-fanout (hot-reloaded on spec change).
+
+apiVersion: k8s-bridge.x-k8s.io/v1alpha1
+kind: WorkloadMixing
+metadata:
+  name: wm-fanout
+  namespace: slurm-jobs
+spec:
+  slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
+  allowInsecureHTTP: true
+  localQueue: "gpu-queue"
+  slurmUser: ""
+  slurmTokenFile: "/var/run/secrets/slurm/token"
+  partitionMappings:
+    - { partitionName: "fanout-1", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-2", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-3", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-4", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-5", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-6", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-7", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-8", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-9", workloadPriorityClass: "normal-priority" }
+    - { partitionName: "fanout-10", workloadPriorityClass: "normal-priority" }
+  slurmd:
+    image: "ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04"
+    confServer: "slurm-controller.slurm.svc.cluster.local:6817"
+    authSecretName: "slurm-auth-slurm"

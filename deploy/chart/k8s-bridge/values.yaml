@@ -1,0 +1,300 @@
+image:
+  # The release pipeline (.github/workflows/release.yaml) publishes here on
+  # every vX.Y.Z tag; registry location itself is still marked as a
+  # revisit-before-GA decision in that workflow's header.
+  repository: ghcr.io/mrozacki/k8s-bridge/k8s-bridge
+  # tag defaults to .Chart.AppVersion when empty; prefer digest for immutability.
+  tag: ""
+  digest: "" # e.g. sha256:...; wins over tag when set
+  pullPolicy: IfNotPresent
+
+# imagePullSecrets: [{ name: my-registry-cred }]
+imagePullSecrets: []
+
+# nameOverride / fullnameOverride let two installs coexist on one cluster.
+nameOverride: ""
+fullnameOverride: ""
+
+# Controller-level trust anchor (security audit C1): only images whose ref
+# starts with one of these prefixes may run as the privileged slurmd node. This
+# is deliberately NOT part of the config/CR below — the CR author is exactly who
+# it defends against. Empty disables the check (the controller logs a warning).
+allowedSlurmdImages:
+  - "ghcr.io/slinkyproject/"
+
+# Measured baseline: 88Mi RSS at 5000 jobs, 1.6% CPU (scale test).
+# Requests reflect steady-state; limits leave headroom for larger backlogs
+# without being generous enough to mask a real leak/regression. The 20k-job
+# scale run (suite E, 2026-07) OOM-killed the pod at the previous 256Mi limit;
+# 1Gi holds that backlog. For deliberate stress tests use
+# values-gke-test.yaml, which raises limits further.
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { cpu: 200m, memory: 1Gi }
+
+# Standard Helm scheduling/customization knobs for the controller pod. All
+# empty/off by default — this chart makes no assumption about your node
+# topology. Wired into the Deployment's pod template with the usual
+# `with`/`toYaml` idiom, so any value shape kubectl accepts here is passed
+# through verbatim.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Spreads replicas (only meaningful once you also raise `replicas` below)
+# across the topology domain of your choice, e.g. zones. Empty = no spread
+# constraint rendered.
+topologySpreadConstraints: []
+# Extra annotations/labels merged onto the pod template (NOT the Deployment
+# object itself) — e.g. for a log/metrics sidecar injector or a compliance
+# label your platform requires on every pod.
+podAnnotations: {}
+podLabels: {}
+
+# replicas: how many controller pods the Deployment runs. Only useful above 1
+# when leaderElect (below) is on, which it is by default — a second replica
+# then sits idle until it wins the coordination.k8s.io Lease, giving a hot
+# standby instead of double-processing. This chart shipped with a hardcoded
+# `replicas: 1` and told README readers to "bump replicas yourself"; there was
+# no knob to bump. Kept at 1 by default: a cold-standby second replica adds
+# very little (the Recreate rollout strategy already makes single-replica
+# upgrades safe) but does cost another pod's worth of resources.requests.
+replicas: 1
+
+# leaderElect wires --leader-elect (ADR-0011, default on): the controller
+# uses a coordination.k8s.io Lease so a second replica sits idle instead of
+# double-processing/double-creating JobSets. RBAC for leases is granted
+# unconditionally in templates/rbac.yaml (see the comment there).
+leaderElect: true
+# L9: short lease/renew so leadership hands over quickly on a rolling restart.
+# Paired with the Deployment's Recreate strategy (the actual deadlock fix).
+leaseDurationSeconds: 15
+renewDeadlineSeconds: 10
+
+# PodDisruptionBudget: off by default (a single-replica controller with a
+# PDB that blocks its only pod from ever draining is a foot-gun during node
+# maintenance). Turn this on once you run replicas > 1 with leader election,
+# so a voluntary drain (node upgrade, cluster-autoscaler) cannot take out
+# every replica at once mid-Lease-handover.
+podDisruptionBudget:
+  enabled: false
+  # minAvailable and maxUnavailable are MUTUALLY EXCLUSIVE (a Kubernetes PDB
+  # rejects a spec with both set). This chart's template prefers minAvailable
+  # when you set it to a non-empty value; leave it empty (the default) to use
+  # maxUnavailable instead.
+  minAvailable: ""
+  maxUnavailable: 1
+
+# priorityClass (backlog P6): a dedicated PriorityClass for the bridge
+# Deployment so the controller is not evicted under the very node pressure
+# it manages. Off by default (a cluster-wide object outside this chart's own
+# namespace scope) — enable with `create: true` for production installs.
+priorityClass:
+  create: false
+  # A custom value below system-cluster-critical (2000000000) so the bridge
+  # never outranks core cluster components, but well above ordinary
+  # workload priorities (P6 baseline).
+  value: 1000000000
+  # name defaults to the chart's fullname when empty.
+  name: ""
+
+# RBAC scope (security audit H4). namespaced=true grants the controller a
+# Role+RoleBinding in each namespace it manages (least privilege). Set
+# namespaced=false only for a genuinely multi-namespace install, which needs a
+# cluster-scoped ClusterRole. See templates/rbac.yaml.
+rbac:
+  namespaced: true
+  # Extra namespaces (besides config.namespace) the controller creates JobSets
+  # in; a Role/RoleBinding is rendered for each when namespaced=true.
+  extraNamespaces: []
+
+# Optional default-deny NetworkPolicy limiting the controller to kube-apiserver
+# and the slurmrestd endpoint. Off by default (needs cluster CNI support).
+networkPolicy:
+  enabled: false
+
+# Service fronting the controller's metrics/health port (8080). Always
+# rendered — the same port already serves /healthz, /readyz and /metrics, so
+# there is no reason to gate this behind a flag the way serviceMonitor and
+# prometheusRule are below (those need a CRD this chart cannot assume is
+# installed; a plain Service needs nothing extra).
+service:
+  type: ClusterIP
+  port: 8080
+
+# ServiceMonitor (prometheus-operator CRD monitoring.coreos.com/v1) for the
+# metrics Service above. Off by default because it requires the
+# prometheus-operator CRDs to be installed in-cluster — `helm install` fails
+# outright if the CRD is missing and this is enabled. Enable once
+# kube-prometheus-stack (or an equivalent prometheus-operator install) is
+# present; see deploy/monitoring/README.md for how this project wires up
+# Kueue's own ServiceMonitor the same way.
+serviceMonitor:
+  enabled: false
+  interval: "30s"
+  scrapeTimeout: "10s"
+  # Extra labels merged onto the ServiceMonitor object itself — most
+  # kube-prometheus-stack installs gate their Prometheus's
+  # serviceMonitorSelector on a `release: <helm-release-name>` label; set it
+  # here if yours does (see deploy/monitoring/README.md's note on the same
+  # gotcha for Kueue's ServiceMonitor).
+  labels: {}
+
+# PrometheusRule (prometheus-operator CRD) translating the 7 alerts described
+# in docs/operations.md ("Alerts (minimum viable set)") into actual alerting
+# rules. Off by default for the same CRD-availability reason as
+# serviceMonitor above. Several of these alerts key off metrics this chart
+# does NOT ship an exporter for (a Slurm node-state exporter, kube-state-metrics
+# for pod-restart/readiness signals) — see the per-rule comments in
+# templates/prometheusrule.yaml for exactly what else must be scraped into
+# the same Prometheus for that rule to actually fire. Thresholds below default
+# to the values documents/operations.md prescribes; override per-rule `for`/
+# `window` if your pollInterval or cluster scale calls for it.
+prometheusRule:
+  enabled: false
+  # Extra labels merged onto the PrometheusRule object — same
+  # serviceMonitorSelector-style gotcha as above can apply to
+  # ruleSelector/ruleNamespaceSelector depending on your Prometheus CR.
+  labels: {}
+  rules:
+    # Alert 1: bridge tick failures > 3 consecutive (Slurm URL down, expired
+    # JWT). "Consecutive" is approximated as >=3 failed ticks within `window`
+    # — sized for the default 10s pollInterval; widen it if you raise
+    # config.pollInterval well beyond that.
+    tickFailures:
+      window: "2m"
+      for: "0m"
+      severity: critical
+    # Alert 2: a Workload pending > 30 min with QuotaReserved=False in a
+    # mixing queue (capacity starvation or a misconfigured quota). Kueue does
+    # not (as of v0.18) expose a metric split specifically by the
+    # QuotaReserved condition, so this alerts on sustained
+    # kueue_pending_workloads instead — a documented approximation, not an
+    # exact translation; tighten it once Kueue exposes a more precise series.
+    workloadPendingQuotaReserved:
+      for: "30m"
+      severity: warning
+    # Alert 3: a dynamic node in Slurm DOWN state > 5 min (ReturnToService
+    # misconfig regression). REQUIRES a Slurm Prometheus exporter scraped
+    # into the same Prometheus — this chart ships no such exporter; the expr
+    # in the template is illustrative and names a placeholder metric.
+    dynamicNodeDown:
+      for: "5m"
+      severity: warning
+    # Alert 4: slurm-controller-0 / kueue-controller-manager not Ready.
+    # REQUIRES kube-state-metrics in the same Prometheus.
+    controlPlaneNotReady:
+      for: "5m"
+      severity: critical
+    # Alert 5: a RayCluster head pod restarted (SPOF — kills every in-cluster
+    # Ray job on that cluster). REQUIRES kube-state-metrics.
+    rayHeadRestart:
+      window: "15m"
+      severity: warning
+    # Alert 6: k8s_bridge_jobs_failed_total increasing (a JobSet died before
+    # its Slurm job ran — D1).
+    jobsFailedIncreasing:
+      window: "15m"
+      severity: warning
+    # Alert 7: leader_election_master_status == 0 on every replica at once
+    # (no replica holds the Lease — the reconcile loop is not running).
+    leaderElectionLost:
+      for: "2m"
+      severity: critical
+
+# client-go rate ceiling for the controller's Kubernetes API client
+# (--kube-api-qps/--kube-api-burst; audit P8b, made configurable after the
+# suite-E scale run). On shared clusters whose admission webhooks struggle
+# under a JobSet-creation burst, LOWER these — the bridge trades backlog
+# ramp-up speed for control-plane headroom. burst must be >= qps.
+kubeClient:
+  qps: 20
+  burst: 40
+
+# configSource selects how the controller loads its configuration:
+#   file - render `config` below into a ConfigMap and pass --config (default;
+#          matches every other bridge flag being chart-driven, no CRD required).
+#   cr   - the controller reads WorkloadMixing custom resources instead;
+#          `config` below is ignored and no ConfigMap is mounted. Requires
+#          the WorkloadMixing CRD (shipped in crds/) and CR(s) applied
+#          separately with the same spec shape as `config` below — see
+#          deploy/crd/workloadmixing-sample.yaml. Spec changes hot-reload
+#          without a restart (A1). Two variants, chosen by
+#          `workloadmixing.name` below:
+#            - name EMPTY (default): SUPERVISOR mode (ADR-0015 Phase A) —
+#              the controller watches EVERY WorkloadMixing in the release
+#              namespace and runs one reconcile loop (own Slurm client,
+#              poll loop, health state) per CR, started/stopped as CRs
+#              come and go. Creating a CR is all a platform user needs to
+#              do; no per-CR Helm release.
+#            - name SET: single-CR binding (--workloadmixing) — exactly the
+#              pre-ADR-0015 behavior, kept as the compatibility/escape
+#              hatch (e.g. to pin one controller to one CR during an
+#              upgrade, or a CR outside the release namespace).
+#          (File mode has no CR to watch, so it stays one-shot at startup,
+#          as before.)
+configSource: file
+
+# Only used when configSource=cr. Leave name empty (the default) for
+# supervisor mode — all WorkloadMixing CRs in the release namespace. Set
+# name (namespace defaults to the release namespace) to bind the controller
+# to a single CR instead; setting namespace without name is rejected at
+# template time (the supervisor watches the release namespace only —
+# cluster-wide/off-namespace watching is ADR-0015 Phase B, not shipped).
+workloadmixing:
+  namespace: ""
+  name: ""
+
+config:
+  # Use https so the bearer-equivalent Slurm token is not sent in cleartext.
+  # For a plaintext in-cluster endpoint you must set allowInsecureHTTP: true
+  # (see values-gke-test.yaml for the test-environment override).
+  slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
+  allowInsecureHTTP: true
+  # slurmCACertFile: /etc/k8s-bridge/ca.crt
+  slurmTokenFile: "/var/run/secrets/slurm/token"
+  # X-SLURM-USER-NAME sent with the token. MUST be a REAL Slurm user — an
+  # unknown user makes slurmrestd reject EVERY job update (comment AND
+  # release) with 422 "Invalid user id" (found live in e2e testing, error 2010).
+  # Empty (the default) omits the header entirely, so slurmrestd uses the
+  # user the mounted JWT was minted for — the safe choice. Set this ONLY to a
+  # dedicated low-privilege Slurm user you have actually provisioned (security
+  # audit H3/L3), whose token you mount, not an arbitrary name.
+  slurmUser: ""
+  namespace: "slurm-jobs"
+  localQueue: "main"
+  pollInterval: "10s"
+  # Per-request slurmrestd HTTP timeout (default 30s, bounds 1s..10m). The
+  # GET /jobs payload grows with TOTAL queue depth (no server-side paging in
+  # v0.0.44); raise this for deliberate large-backlog deployments.
+  # slurmRequestTimeout: "30s"
+  # Client-side rate limit toward slurmrestd itself (distinct from
+  # kubeClient.qps/burst above, which limits calls to kube-apiserver). 0
+  # (default) is unlimited — slurmrestd is polled at pollInterval cadence
+  # with no extra throttling. Set this on shared/rate-limited slurmrestd
+  # deployments to cap how many HTTP requests/second the bridge issues to it.
+  # slurmRequestsPerSecond: 0
+  # Cap user-originated priority requests so a job owner cannot jump the whole
+  # mixed queue (security audit H1). 0 disables the extra cap.
+  maxUserPriority: 10000
+  # Bounded worker pool for parallel JobSet creation across held jobs (P5).
+  # Defaults to 8 when omitted; the client-go QPS/Burst ceiling below still
+  # bounds actual API throughput regardless of pool size.
+  # createWorkers: 8
+  partitionMappings:
+    - partitionName: "mixing"
+      workloadPriorityClass: "normal-priority"
+    - partitionName: "mixing-gpu"
+      workloadPriorityClass: "normal-priority"
+      localQueue: "dws-gpu-lq"
+  slurmd:
+    # Digest-pin the privileged slurmd image before production.
+    image: "ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04"
+    confServer: "slurm-controller.slurm.svc.cluster.local:6817"
+    # Must EXIST IN THIS RELEASE'S NAMESPACE before jobs run: Secrets are
+    # namespace-scoped and the bridge deliberately does not sync credentials
+    # across namespaces (decision 2026-07-13) — copy it from
+    # the Slurm operator's namespace per docs/installation.md §3.1.
+    authSecretName: "slurm-auth-slurm"
+    # privileged: true  # default; set false to trial a minimal-capability slurmd
+
+slurmTokenSecret: "slurm-rest-token"

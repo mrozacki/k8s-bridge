@@ -1,0 +1,46 @@
+# RayCluster admitted by Kueue via its native KubeRay integration (ADR-0002).
+# It draws from the same ClusterQueue quota as Slurm jobs and K8s batch Jobs —
+# that is the whole point of the mixing demo.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: sample-raycluster
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: main
+    kueue.x-k8s.io/priority-class: normal-priority
+spec:
+  rayVersion: "2.46.0" # verify against images available for the installed KubeRay
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: rayproject/ray:2.46.0
+            resources:
+              requests:
+                cpu: "1"
+                memory: 2Gi
+              limits:
+                cpu: "1"
+                memory: 2Gi
+  workerGroupSpecs:
+    - groupName: workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 2
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: rayproject/ray:2.46.0
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi

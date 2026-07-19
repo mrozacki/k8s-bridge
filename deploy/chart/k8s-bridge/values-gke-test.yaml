@@ -1,0 +1,31 @@
+# TEST-ENVIRONMENT OVERRIDES — NOT FOR PRODUCTION.
+#
+# Overlay for the GKE integration/scale test clusters (test plan suites D–F):
+#   helm upgrade --install k8s-bridge deploy/chart/k8s-bridge \
+#     -n slurm-jobs -f deploy/chart/k8s-bridge/values-gke-test.yaml \
+#     --set image.repository=<your-registry>/k8s-bridge --set image.tag=<tag>
+#
+# Everything here deliberately relaxes a production default and documents why.
+# The base values.yaml stays secure-by-default (https, canonical token path,
+# tight resource limits); this file is the single place test-only drift lives.
+
+image:
+  # Set per environment on the command line (see header). Left empty here so
+  # this overlay never hardcodes a private registry into the repo.
+  repository: ""
+  tag: ""
+
+# Scale suites (TC-E2: 20,000 queued jobs) need more headroom than the
+# production defaults: the bridge parses the full /jobs payload every poll
+# tick. Sized from the 2026-07 suite-E run where 1Gi was enough for 20k jobs
+# but left <20% headroom; 2Gi/1cpu gives margin without masking real leaks.
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { cpu: "1", memory: 2Gi }
+
+config:
+  # The Slinky test deployment serves slurmrestd over plain HTTP inside the
+  # cluster; TLS for slurmrestd is not part of the test topology. Explicit
+  # opt-in required by the config validator (audit H2).
+  slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
+  allowInsecureHTTP: true

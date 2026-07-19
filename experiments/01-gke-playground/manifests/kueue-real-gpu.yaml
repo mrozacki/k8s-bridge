@@ -1,0 +1,58 @@
+# Kueue queuing topology reference template for GKE clusters with real GPUs (e.g. Spot T4 / L4).
+#
+# Unlike simulated GPU testing (which uses custom labels like workload-mixing/gpu-sim),
+# physical GPU node pools in GKE automatically apply standard node labels and taints
+# (such as nvidia.com/gpu:NoSchedule).
+#
+# This file provides the recommended Kueue ResourceFlavor, ClusterQueue, and LocalQueue
+# configuration required to schedule GPU workloads on physical GKE GPU hardware without
+# encountering "untolerated taint" scheduling failures.
+
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: gke-spot-gpu
+spec:
+  nodeLabels:
+    cloud.google.com/gke-spot: "true"
+  # Mandatory toleration to allow Kueue-admitted pods to schedule onto GKE GPU nodes.
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: gpu-queue
+spec:
+  namespaceSelector: {}
+  preemption:
+    withinClusterQueue: LowerPriority
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+      flavors:
+        - name: gke-spot-gpu
+          resources:
+            - name: cpu
+              nominalQuota: "16"       # Sized for 4x n1-standard-4 (4 VCPU each)
+            - name: memory
+              nominalQuota: 48Gi       # Sized for 4x n1-standard-4 (15GB each, leaving system headroom)
+            - name: nvidia.com/gpu
+              nominalQuota: "4"        # Exactly 4 GPUs total across the pool
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: gpu-queue
+  namespace: slurm-jobs
+spec:
+  clusterQueue: gpu-queue
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: gpu-queue
+  namespace: ray
+spec:
+  clusterQueue: gpu-queue

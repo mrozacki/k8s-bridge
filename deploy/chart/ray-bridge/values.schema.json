@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "ray-bridge Helm values",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "image",
+    "config"
+  ],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": [
+        "repository",
+        "pullPolicy"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "allowedWorkerImages": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "resources": {
+      "type": "object"
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Deployment replica count. >1 only useful with leaderElect=true (the default)."
+    },
+    "nodeSelector": {
+      "type": "object"
+    },
+    "tolerations": {
+      "type": "array"
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "podAnnotations": {
+      "type": "object"
+    },
+    "podLabels": {
+      "type": "object"
+    },
+    "leaderElect": {
+      "type": "boolean"
+    },
+    "leaseDurationSeconds": {
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "renewDeadlineSeconds": {
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "certManager": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "failurePolicy": {
+          "type": "string",
+          "enum": ["Ignore", "Fail"]
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "localQueue",
+        "managedClusters",
+        "poolMappings",
+        "worker"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "localQueue": {
+          "type": "string",
+          "minLength": 1
+        },
+        "managedClusters": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "headAddress"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "headAddress": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "poolMappings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pool",
+              "workloadPriorityClass"
+            ],
+            "properties": {
+              "pool": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workloadPriorityClass": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "image",
+            "defaultWorkers",
+            "defaultCpus",
+            "defaultMemoryMB"
+          ],
+          "properties": {
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "gpuResourceName": {
+              "type": "string"
+            },
+            "defaultWorkers": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "defaultCpus": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "defaultMemoryMB": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

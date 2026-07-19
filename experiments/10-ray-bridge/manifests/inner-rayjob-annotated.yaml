@@ -1,0 +1,104 @@
+# Sample inner RayJob — manual pin-gate submission (ADR-0013).
+#
+# "Inner workload" = a RayJob that attaches to an EXISTING shared RayCluster
+# via clusterSelector, instead of carrying its own inline rayClusterSpec.
+# ray-bridge only admits inner workloads; a RayJob with its own cluster is out
+# of scope (handled by Kueue's native RayJob integration instead).
+#
+# This file shows the annotations + pin you must set BY HAND when the
+# optional admission webhook (internal/raywebhook, deploy/ray-bridge/webhook.yaml)
+# is NOT installed. If the webhook IS installed and wired up for your
+# namespace, you may omit `spec.entrypointResources` — the webhook injects it
+# for you. See deploy/ray-bridge/README.md, section "Submitting an inner
+# workload", for the full explanation and the with-webhook variant of this
+# file.
+#
+# Full mechanism: docs/adr/0013-ray-pin-gate-admission.md
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  # The pin name below (spec.entrypointResources) is derived as
+  # "wm-job-<metadata.name>" — see internal/raytranslate.PinResource(). It
+  # MUST match this name exactly, or the driver will wait forever for a
+  # resource that ray-bridge's dedicated workers never advertise (they
+  # advertise "wm-job-<metadata.name>", keyed off THIS field, not the pin
+  # string you typed). If you rename the job, rename the pin too.
+  name: inner-example
+  namespace: ray
+  annotations:
+    # --- ray-bridge capacity-request annotations -----------------------
+    # These are the RayJob-side analog of Slurm's --partition / --ntasks /
+    # --cpus-per-task / --gres: they tell ray-bridge how much DEDICATED
+    # worker capacity to stand up (as a Kueue-admitted JobSet) for this job.
+    # All are optional; unset values fall back to the ray-bridge config
+    # (rayconfig.Worker defaults). See internal/ray/rayjob.go for the exact
+    # annotation keys and defaulting rules.
+
+    # Which pool this job belongs to. Must be one of the pools mapped to a
+    # WorkloadPriorityClass in the ray-bridge config's poolMappings (see
+    # experiments/10-ray-bridge/ray-bridge-config.yaml for an example with
+    # "batch" -> normal-priority and "interactive" -> high-priority).
+    # REQUIRED when the webhook is enabled (an unmapped/missing pool is
+    # DENIED at admission time); without the webhook, an unmapped pool just
+    # means the reconciler won't pick the job up.
+    ray-bridge.x-k8s.io/pool: "batch"
+
+    # How many dedicated worker pods to create for this job.
+    ray-bridge.x-k8s.io/workers: "2"
+
+    # CPU (cores) requested per worker pod. Also how many units of the pin
+    # resource each worker advertises (see workerStartCommand in
+    # internal/raytranslate/translate.go) — so PinUnits (the driver's request,
+    # fixed at 1) is always satisfiable once at least one worker joins.
+    ray-bridge.x-k8s.io/worker-cpus: "2"
+
+    # Optional: GPUs per worker pod (omit or "0" for CPU-only jobs).
+    # ray-bridge.x-k8s.io/worker-gpus: "0"
+
+    # Optional: memory per worker pod (Kubernetes quantity syntax). Falls
+    # back to the config's defaultMemoryMB when unset.
+    # ray-bridge.x-k8s.io/worker-memory: "4Gi"
+
+    # Optional: override the LocalQueue this job's worker JobSet is
+    # submitted to (defaults to the pool's mapped queue, or the config's
+    # global localQueue).
+    # ray-bridge.x-k8s.io/local-queue: "team-interactive"
+spec:
+  entrypoint: "python -c \"import socket; print('INNER_EXAMPLE_RAN_ON=' + socket.gethostname())\""
+
+  # --- the pin-gate admission mechanism (ADR-0013) ----------------------
+  # entrypointResources is a JSON-STRING field (KubeRay quirk: it is a
+  # string containing JSON, not a nested object). It must request exactly
+  # 1 unit of "wm-job-<metadata.name>" — the custom Ray resource that only
+  # ray-bridge's dedicated, Kueue-admitted workers advertise. Until such a
+  # worker joins the shared cluster, Ray's scheduler cannot place the
+  # driver, so the job effectively waits for Kueue admission even though
+  # nothing here says "suspend".
+  #
+  # Manual case (no webhook): you must set this field yourself, and its key
+  # MUST be "wm-job-" + this RayJob's metadata.name (here: "inner-example").
+  # A mismatch (e.g. leftover pin from a copy-pasted manifest) is the most
+  # common gotcha — the driver just hangs pending with no error.
+  #
+  # Webhook case: omit this field. The webhook computes the same string
+  # from metadata.name and injects it for you (merging with any
+  # entrypointResources you did provide, so your own resource requests are
+  # preserved).
+  entrypointResources: '{"wm-job-inner-example": 1}'
+
+  # clusterSelector is what makes this an INNER workload: it targets an
+  # existing, already-running shared RayCluster instead of KubeRay
+  # provisioning a dedicated one from an inline rayClusterSpec. The key is
+  # fixed by KubeRay ("ray.io/cluster"); the value is the target
+  # RayCluster's metadata.name (must be one of ray-bridge's managedClusters,
+  # see the config's managedClusters[].name).
+  clusterSelector:
+    ray.io/cluster: shared-cluster
+
+  # --- do NOT set spec.suspend -------------------------------------------
+  # KubeRay FORBIDS spec.suspend in clusterSelector mode outright ("the
+  # ClusterSelector mode doesn't support the suspend operation") — this was
+  # the live finding that superseded the original suspend-based design
+  # (ADR-0006/0012) with this pin-gate model (ADR-0013). Simply never set
+  # spec.suspend on an inner RayJob; the field is omitted here on purpose,
+  # not left out by oversight.

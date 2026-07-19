@@ -1,0 +1,68 @@
+# ServiceMonitor for Kueue's controller-manager metrics endpoint.
+#
+# Backlog: L10. Without this, the researcher Grafana
+# dashboards (dashboards/researcher-dashboards.json) render fine but every
+# panel is empty — kube-prometheus-stack's Prometheus never scrapes Kueue.
+#
+# Source of truth for the target service/port/scheme/auth (verified against
+# the upstream release actually used by this project):
+#   https://github.com/kubernetes-sigs/kueue/releases/download/v0.18.2/manifests.yaml
+#   (built from config/default + config/default/metrics_service.yaml,
+#   branch release-0.18)
+#
+# That manifests.yaml is a kustomize build of config/default with:
+#   namespace:  kueue-system
+#   namePrefix: kueue-
+# applied to config/default/metrics_service.yaml:
+#   metadata.name: controller-manager-metrics-service  -> kueue-controller-manager-metrics-service
+#   spec.ports: [{name: https, port: 8443, targetPort: 8443}]
+#   selector: {control-plane: controller-manager}
+# plus a label patch (also in config/default/kustomization.yaml) that adds
+#   app.kubernetes.io/component: metrics-service
+#   app.kubernetes.io/name: kueue
+# to that same Service. This project deploys Kueue exactly this way — see
+# experiments/10-ray-bridge/README.md:
+#   kubectl apply --server-side -f
+#     https://github.com/kubernetes-sigs/kueue/releases/download/v0.18.2/manifests.yaml
+#
+# The endpoint spec below (path/port/scheme/bearerTokenFile/tlsConfig) mirrors
+# Kueue's own upstream example ServiceMonitor,
+# config/components/prometheus/monitor.yaml (also release-0.18), which is
+# NOT applied by manifests.yaml by default (the [PROMETHEUS] overlay in
+# config/default/kustomization.yaml is commented out upstream) — hence this
+# standalone manifest instead of relying on upstream to ship it for us.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kueue-controller-manager-metrics-monitor
+  namespace: kueue-system
+  labels:
+    app.kubernetes.io/name: kueue
+    app.kubernetes.io/component: metrics-service
+    # REQUIRED: kube-prometheus-stack's Prometheus Operator only picks up
+    # ServiceMonitors matching its `serviceMonitorSelector`. The chart's
+    # default value is `release: <helm-release-name>` (e.g. `release: kube-prometheus-stack`
+    # or `release: prometheus` — check with:
+    #   helm get values <your-release> -n <ns> -o json | jq '.prometheus.prometheusSpec.serviceMonitorSelector'
+    # and set the label below to match your installation's Helm release name.
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - kueue-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kueue
+      app.kubernetes.io/component: metrics-service
+  endpoints:
+    - port: https               # Service port name "https" -> containerPort 8443
+      path: /metrics
+      scheme: https
+      interval: 30s
+      # Kueue's metrics endpoint is served through kube-rbac-proxy: it requires
+      # a bearer token with a ClusterRoleBinding granting `get` on the
+      # nonResourceURL /metrics (see kueue-metrics-reader-binding.yaml in this
+      # directory), and presents a self-signed serving cert.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true   # prototype only; Kueue supports cert-manager-issued certs for production (config/default's [CERTMANAGER] overlay)

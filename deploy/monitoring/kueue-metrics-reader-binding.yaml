@@ -1,0 +1,40 @@
+# Grants the kube-prometheus-stack Prometheus ServiceAccount permission to
+# read Kueue's /metrics endpoint via kube-rbac-proxy's SubjectAccessReview
+# check (nonResourceURLs, not a normal resource — a plain "get pods"-style
+# Role/RoleBinding does not cover this).
+#
+# Kueue ships the ClusterRole itself (name: metrics-reader) as part of
+# manifests.yaml / config/components/rbac/metrics_reader_role.yaml
+# (release-0.18):
+#   apiVersion: rbac.authorization.k8s.io/v1
+#   kind: ClusterRole
+#   metadata:
+#     name: metrics-reader
+#   rules:
+#   - nonResourceURLs: ["/metrics"]
+#     verbs: ["get"]
+#
+# It does NOT ship a binding to Prometheus's ServiceAccount (upstream leaves
+# that to the cluster operator / a [PROMETHEUS] kustomize overlay that is
+# commented out by default). This file supplies that missing binding.
+#
+# EDIT before applying: set subjects[0].name / namespace to match your
+# kube-prometheus-stack install. The common default for the community Helm
+# chart (prometheus-community/kube-prometheus-stack) is:
+#   name:      <release-name>-kube-prometheus-prometheus
+#   namespace: <namespace you installed the chart into, e.g. monitoring>
+# Verify with:
+#   kubectl get prometheus -A -o jsonpath='{.items[0].spec.serviceAccountName}'
+#   kubectl get sa -n <that namespace>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kueue-metrics-reader-prometheus-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-reader   # shipped by Kueue's own manifests.yaml (v0.18.2)
+subjects:
+  - kind: ServiceAccount
+    name: kube-prometheus-stack-prometheus   # EDIT: match your Prometheus SA
+    namespace: monitoring                     # EDIT: match your kube-prometheus-stack namespace

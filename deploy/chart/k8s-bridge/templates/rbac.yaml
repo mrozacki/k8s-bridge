@@ -1,0 +1,110 @@
+{{- /*
+Least-privilege RBAC (security audit H4). In namespaced mode the controller
+gets a Role+RoleBinding in each managed namespace; in cluster mode a single
+ClusterRole+Binding. The rule set is identical either way — only the scope
+differs.
+
+WorkloadMixing is a platform-admin resource: it selects the privileged slurmd
+image, the mounted storage and the priority mapping. Do NOT add these verbs to
+the aggregated `edit`/`admin` roles — grant them only to platform operators.
+*/}}
+{{- define "k8s-bridge.policyRules" -}}
+- apiGroups: ["jobset.x-k8s.io"]
+  resources: ["jobsets"]
+  verbs: ["get", "list", "watch", "create", "update", "delete"]
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["workloads"]
+  verbs: ["get", "list", "watch", "patch"]
+{{- /*
+WorkloadMixing verbs are only exercised in configSource=cr mode (--workloadmixing
+reads the CR and patches its status). Granted unconditionally anyway: it's a
+narrow, own-CRD grant (not a security-sensitive escalation like the slurmd
+image trust anchor above), and keeping it unconditional means switching
+configSource later doesn't also require a Helm upgrade to fix RBAC.
+*/}}
+- apiGroups: ["k8s-bridge.x-k8s.io"]
+  resources: ["workloadmixings"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["k8s-bridge.x-k8s.io"]
+  resources: ["workloadmixings/status"]
+  verbs: ["get", "patch", "update"]
+{{- /*
+Events RBAC (AUD2 remainder): the controller now emits Kubernetes Events on
+JobSets (Created/Released/JobSetFailed/TranslationFailed) via the manager's
+EventRecorder. This was previously removed because nothing emitted them —
+re-added now that something does.
+*/}}
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+{{- /*
+Leader election (ADR-0011): the coordination.k8s.io Lease backing
+--leader-elect (default on). Granted unconditionally, like the
+WorkloadMixing verbs above — a Helm upgrade to flip leaderElect on/off
+should not also require an RBAC change.
+*/}}
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- end -}}
+
+{{- $namespaces := list .Values.config.namespace -}}
+{{- range .Values.rbac.extraNamespaces -}}{{- $namespaces = append $namespaces . -}}{{- end -}}
+{{- if .Values.leaderElect -}}{{- $namespaces = append $namespaces .Release.Namespace -}}{{- end -}}
+{{- $namespaces = $namespaces | uniq -}}
+
+{{- if .Values.rbac.namespaced }}
+{{- range $ns := $namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "k8s-bridge.fullname" $ }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "k8s-bridge.labels" $ | nindent 4 }}
+rules:
+{{ include "k8s-bridge.policyRules" $ | indent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "k8s-bridge.fullname" $ }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "k8s-bridge.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "k8s-bridge.fullname" $ }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "k8s-bridge.fullname" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- else }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "k8s-bridge.fullname" . }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+rules:
+{{ include "k8s-bridge.policyRules" . | indent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "k8s-bridge.fullname" . }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "k8s-bridge.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "k8s-bridge.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

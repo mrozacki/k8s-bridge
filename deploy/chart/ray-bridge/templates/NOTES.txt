@@ -1,0 +1,47 @@
+ray-bridge {{ .Chart.AppVersion }} has been installed/upgraded in namespace {{ .Release.Namespace }} (release {{ .Release.Name }}).
+
+{{- if not .Values.webhook.enabled }}
+
+*** webhook.enabled is FALSE ***
+Inner RayJobs that omit spec.entrypointResources will schedule immediately
+on the shared RayCluster — no Kueue admission, no quota check, no pool
+mapping. See this chart's README.md ("Without the webhook, Kueue admission
+is opt-in, not enforced") before relying on ray-bridge for admission control
+in this namespace.
+{{- end }}
+
+1. Watch the rollout (Recreate strategy — expect a brief gap while the old
+   pod terminates before the new one starts):
+
+     kubectl rollout status deployment/{{ include "ray-bridge.fullname" . }} -n {{ .Release.Namespace }}
+
+2. Confirm the controller is Ready:
+
+     kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+     kubectl port-forward -n {{ .Release.Namespace }} deploy/{{ include "ray-bridge.fullname" . }} 8081:8081
+     curl -s localhost:8081/readyz
+
+3. Metrics are served on port 8080 of the same pod (no dedicated Service is
+   rendered for it by this chart, unlike k8s-bridge's — port-forward
+   directly or add your own scrape config):
+
+     kubectl port-forward -n {{ .Release.Namespace }} deploy/{{ include "ray-bridge.fullname" . }} 8080:8080
+     curl -s localhost:8080/metrics
+
+{{- if .Values.webhook.enabled }}
+
+4. The admission webhook is enabled. Confirm its certificate is ready and
+   the MutatingWebhookConfiguration has picked up the CA bundle:
+
+     kubectl get certificate {{ include "ray-bridge.webhookCertificateName" . }} -n {{ .Release.Namespace }}
+     kubectl get mutatingwebhookconfiguration {{ include "ray-bridge.fullname" . }}-auto-suspend -o jsonpath='{.webhooks[0].clientConfig.caBundle}'
+
+   And that your workload namespace(s) carry the label the webhook's
+   namespaceSelector requires:
+
+     kubectl label namespace {{ .Values.config.namespace }} ray-bridge.x-k8s.io/managed=true --overwrite
+{{- end }}
+
+5. Full submission mechanics (the pin-gate model, RayJob annotations, and
+   the without-webhook manual procedure) live in
+   deploy/ray-bridge/README.md in the parent repo.

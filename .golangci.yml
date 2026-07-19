@@ -1,0 +1,69 @@
+version: "2"
+linters:
+  enable:
+    - misspell
+    - unconvert
+    - unparam
+    - gosec
+    # copyloopvar: flags loop-variable copies that predate Go 1.22's
+    # per-iteration loop variables (backlog AUD5). No findings on this
+    # codebase's Go 1.26 toolchain at the time this was added.
+    - copyloopvar
+    # thelper: enforces t.Helper()/b.Helper() on test/benchmark helper
+    # functions so a failure reports the caller's line, not the helper's
+    # (backlog AUD5). No findings at the time this was added.
+    - thelper
+    # errcheck and staticcheck are already golangci-lint v2 defaults (part of
+    # the standard preset enabled even with an empty `enable:` list) — listed
+    # here explicitly per backlog AUD5 so the intent ("misuse-prone checks on
+    # deliberately, not by accident") is visible in this file instead of
+    # relying on the tool's implicit default set.
+    - errcheck
+    - staticcheck
+  settings:
+    gosec:
+      excludes:
+        # G304: file inclusion via variable. The only variable paths we read
+        # (config file, Slurm token, CA bundle) come from operator-controlled
+        # flags/config, never from request input — this is by design.
+        - G304
+        # G115: int-conversion-overflow findings. Ownership: backlog SEC0
+        # (the security session) already remediated the conversions that
+        # feed untrusted external sizes into JobSet specs (see
+        # clampUint64ToInt32 in internal/slurm/client.go) and owns the
+        # decision on any remaining int64 conversions of the same class
+        # (e.g. MemoryPerCPU/CPUsPerTask/TasksPerNode → int64, which stay
+        # positive by construction from a Uint64NoVal wrapper but still trip
+        # G115's blanket uint64->int64 rule). Excluded at the rule-ID level
+        # rather than per-line //nolint because this CI-quality-gates pass
+        # (AUD5) does not edit existing .go files; SEC0 can tighten this to
+        # per-line suppression with its own review.
+        - G115
+        # G101 ("potential hardcoded credentials"): false positives on test
+        # fixtures. gosec's heuristic pattern-matches struct field NAMES
+        # (AuthSecretName, ConfServer) rather than values; the actual values
+        # in these fixtures are a Kubernetes Secret *reference* ("slurm-auth-slurm")
+        # or a fake test hostname:port ("ctl:6817") — never a literal secret.
+        # Excluded at the rule-ID level (not per-line //nolint) because this
+        # pass does not edit existing .go/.go test files; SEC0 owns deciding
+        # whether per-line suppression or a gosec:ignore-nolint-directive is
+        # preferred instead.
+        - G101
+  exclusions:
+    rules:
+      # staticcheck QF1008 ("could remove embedded field from selector") and
+      # unparam ("parameter always receives the same value" / "result never
+      # used") are pre-existing style findings on test-only helper code
+      # (internal/bridge/crdconfig_test.go, internal/bridge/priority_test.go,
+      # internal/bridge/tick_bench_test.go). They are correctness-neutral
+      # (QF1008 is a style simplification; the unparam findings are on test
+      # helpers whose unused flexibility documents the full signature other
+      # callers may need) and fixing them requires editing existing _test.go
+      # files, which this CI-quality-gates pass (AUD5) does not own. Scoped
+      # narrowly to the specific linter+path combination rather than
+      # disabling the linter repo-wide, so real findings elsewhere still gate
+      # CI.
+      - path: internal/bridge/(crdconfig_test|priority_test|tick_bench_test)\.go
+        linters:
+          - staticcheck
+          - unparam

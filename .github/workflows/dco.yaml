@@ -1,0 +1,67 @@
+name: dco
+
+# Backlog SEC3 ("DCO enforcement"). CONTRIBUTING.md already asks contributors
+# to sign off commits (`git commit -s`) per the Developer Certificate of
+# Origin (https://developercertificate.org/); this workflow is the CI-side
+# enforcement so an unsigned commit fails the PR instead of relying on
+# reviewers to notice a missing trailer by eye.
+#
+# Implementation choice: a small inline script over a third-party DCO
+# GitHub Action. The check itself is a one-line grep per commit — pulling in
+# an external Action would mean tracking and SHA-pinning yet another
+# supply-chain dependency (matching this repo's SEC3 SHA-pinning stance) for
+# something `git log` can already tell us directly. Dependency-free and
+# auditable in place.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+# Least privilege, matching ci.yaml/nightly.yaml: this only reads commits.
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO sign-off check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Need the full PR commit range, not just the merge commit, to
+          # inspect each individual commit's trailers below.
+          fetch-depth: 0
+
+      - name: check every commit in the PR range has Signed-off-by
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Merge commits carry no new authorship and Dependabot/Copilot-style
+          # automation is out of scope for this human-authored-code gate;
+          # skip merges, check everything else.
+          commits=$(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ -z "${commits}" ]; then
+            echo "no non-merge commits in range ${BASE_SHA}..${HEAD_SHA} — nothing to check"
+            exit 0
+          fi
+
+          missing=0
+          while IFS= read -r sha; do
+            subject=$(git log -1 --format='%s' "${sha}")
+            if git log -1 --format='%B' "${sha}" | grep -qE '^Signed-off-by: .+ <.+>$'; then
+              echo "OK    ${sha} ${subject}"
+            else
+              echo "::error::commit ${sha} (\"${subject}\") has no Signed-off-by trailer — run 'git commit --amend -s' (or rebase with 'git rebase --signoff') and force-push"
+              missing=$((missing + 1))
+            fi
+          done <<< "${commits}"
+
+          if [ "${missing}" -gt 0 ]; then
+            echo "::error::${missing} commit(s) missing a DCO Signed-off-by line. See CONTRIBUTING.md#developer-certificate-of-origin-dco."
+            exit 1
+          fi
+
+          echo "all commits in ${BASE_SHA}..${HEAD_SHA} are signed off"

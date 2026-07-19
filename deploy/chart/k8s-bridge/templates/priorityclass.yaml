@@ -1,0 +1,37 @@
+{{- /*
+Dedicated PriorityClass for the bridge Deployment (backlog P6
+follow-up). PriorityClass is cluster-scoped, like the ClusterRole path in
+rbac.yaml — this is why it is opt-in (priorityClass.create=false by
+default) rather than always rendered, so a namespaced-RBAC install does not
+unexpectedly reach outside its namespace.
+
+Rationale: the controller manages node pressure/quota for everything else
+in the mixed pool, but with no priority of its own it could itself be
+evicted under the exact pressure it is supposed to resolve (e.g. a
+resource-starved node preferring to evict the low-priority bridge pod over
+a Slurm/Ray workload pod). A value comfortably above ordinary workload
+priorities, but below system-cluster-critical (2000000000, reserved for
+kubelet/kube-proxy-class components the bridge is not), keeps it running
+without claiming cluster-critical status it does not need.
+*/}}
+{{- if .Values.priorityClass.create }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "k8s-bridge.priorityClassName" . }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+{{- /*
+Force plain integer formatting: Helm's default templating of a value this
+size (1e9) can render in scientific notation ("1e+09"), which the
+apiserver rejects for an int32 field. `int` normalizes it back to a plain
+decimal integer regardless of how the value was supplied (values.yaml,
+--set, or --set-string).
+*/}}
+value: {{ int .Values.priorityClass.value }}
+globalDefault: false
+description: >-
+  Keeps the k8s-bridge controller running under node pressure it is itself
+  managing (backlog P6). Not cluster-critical; a custom priority above
+  ordinary workloads.
+{{- end }}

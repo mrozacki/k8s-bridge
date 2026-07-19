@@ -1,0 +1,31 @@
+{{- /*
+Off by default (podDisruptionBudget.enabled=false): a PDB on a single-replica
+Deployment just blocks that one pod from ever being voluntarily evicted
+(node drain, cluster-autoscaler scale-down) without actually buying any
+availability, since there is no second pod to fail over to. Turn this on once
+you run `replicas` > 1 with leaderElect (the default), so a voluntary
+disruption cannot take out every replica at once mid-Lease-handover.
+
+minAvailable and maxUnavailable are mutually exclusive on a real PodDisruptionBudgetSpec
+— the apiserver rejects both being set. This template prefers minAvailable
+when set to a non-empty value and otherwise falls back to maxUnavailable
+(default 1); see the comment on both values in values.yaml.
+*/}}
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "k8s-bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "k8s-bridge.selectorLabels" . | nindent 6 }}
+{{- end }}

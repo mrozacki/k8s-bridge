@@ -1,0 +1,16 @@
+namespace: ray
+localQueue: ray-main
+managedClusters:
+  - name: shared-cluster
+    headAddress: shared-cluster-head-svc.ray:6379
+poolMappings:
+  - pool: batch
+    workloadPriorityClass: normal-priority
+  - pool: interactive
+    workloadPriorityClass: high-priority
+    localQueue: team-interactive
+worker:
+  image: rayproject/ray:2.9.0
+  defaultWorkers: 1
+  defaultCpus: 1
+  defaultMemoryMB: 1024

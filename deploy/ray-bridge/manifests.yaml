@@ -1,0 +1,163 @@
+# DEPRECATED: superseded by the Helm chart at deploy/chart/ray-bridge, which
+# now covers everything below (plus production knobs this file does not:
+# scheduling knobs, the webhook's Service/MutatingWebhookConfiguration/
+# cert-manager wiring, a values schema). Use the chart for new installs.
+#
+# This file is NOT actively maintained going forward — it will drift from
+# the chart (it already hardcodes namespace `ray` and a `ray-bridge:dev`
+# image the chart's values.yaml makes configurable). Kept in the repo only
+# because some experiments (see experiments/10-ray-bridge/) may still
+# reference it directly; do not add new fields here without also adding them
+# to the chart.
+#
+# ray-bridge deployment (plain manifests, prototype).
+#
+# Sibling of the k8s-bridge Helm chart (ADR-0012: separate binary, separate
+# Deployment, separate least-privilege RBAC). Originally kept as plain
+# manifests so the moving parts were legible while the Helm chart was a
+# packaging follow-up — that follow-up has now landed (deploy/chart/ray-bridge).
+#
+# Assumes: namespace `ray` exists; KubeRay (ray.io/v1 RayJob), Kueue and JobSet
+# CRDs/controllers are installed; a shared RayCluster named per the ConfigMap's
+# managedClusters is running.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ray-bridge
+  namespace: ray
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ray-bridge
+  namespace: ray
+rules:
+  # Inner workloads: read them, and patch spec.suspend / entrypointResources to
+  # release (unsuspend + pin) or requeue (re-suspend) them.
+  - apiGroups: ["ray.io"]
+    resources: ["rayjobs"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Dedicated worker capacity: the bridge creates and deletes worker JobSets.
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Admission state: read the Kueue Workload the JobSet owns.
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads"]
+    verbs: ["get", "list", "watch"]
+  # Events on RayJobs (Released/Requeued/…).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Leader election.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ray-bridge
+  namespace: ray
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ray-bridge
+subjects:
+  - kind: ServiceAccount
+    name: ray-bridge
+    namespace: ray
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ray-bridge-config
+  namespace: ray
+data:
+  config.yaml: |
+    namespace: ray
+    localQueue: ray-main
+    managedClusters:
+      - name: shared-cluster
+        headAddress: shared-cluster-head-svc.ray:6379
+    poolMappings:
+      - pool: batch
+        workloadPriorityClass: normal-priority
+      - pool: interactive
+        workloadPriorityClass: high-priority
+    worker:
+      image: rayproject/ray:2.9.0
+      defaultWorkers: 1
+      defaultCpus: 1
+      defaultMemoryMB: 1024
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ray-bridge
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: ray-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ray-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ray-bridge
+    spec:
+      serviceAccountName: ray-bridge
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ray-bridge
+          # Replace with the published image once image publishing lands.
+          image: ray-bridge:dev
+          args:
+            - --config=/etc/ray-bridge/config.yaml
+            - --leader-elect=true
+            # Lock the Ray worker image to a trusted prefix (security C1 analog).
+            - --allowed-worker-images=rayproject/
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ray-bridge
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: ray-bridge-config

@@ -1,0 +1,76 @@
+# Helm values override for `helm upgrade --install k8s-bridge deploy/chart/k8s-bridge`
+# on the scale + GPU-churn cluster. Every key below is a REAL key from
+# deploy/chart/k8s-bridge/values.yaml (grepped, not invented) — this file only
+# overrides values, it does not introduce new schema.
+#
+# Usage:
+#   helm upgrade --install k8s-bridge ../../../deploy/chart/k8s-bridge \
+#     --namespace slurm-jobs --create-namespace \
+#     --values bridge-values-scale.yaml \
+#     --set image.repository=${REGISTRY:?set REGISTRY, e.g. REGION-docker.pkg.dev/PROJECT/REPO}/k8s-bridge \
+#     --set image.tag=TAG
+
+image:
+  repository: ${REGISTRY:?set REGISTRY, e.g. REGION-docker.pkg.dev/PROJECT/REPO}/k8s-bridge # fill TAG at install time (--set image.tag=...)
+  tag: ""
+
+allowedSlurmdImages:
+  - "ghcr.io/slinkyproject/"
+
+# Baseline was 88Mi RSS / 1.6% CPU at 5000 jobs on a much smaller
+# backlog mix; this run pushes 500 running + 3000 pending simultaneously plus
+# sustained >100 pods/s churn pressure on the informer cache, so headroom is
+# widened versus the chart default (50m/64Mi requests, 200m/256Mi limits).
+resources:
+  requests: { cpu: 200m, memory: 128Mi }
+  limits: { cpu: 500m, memory: 512Mi }
+
+leaderElect: true
+
+# Dedicated PriorityClass so the bridge is not evicted under the very node
+# pressure it manages — directly relevant here given 500+ running pods and a
+# churn generator sharing the cluster (backlog P6, off by default in the chart).
+priorityClass:
+  create: true
+
+rbac:
+  namespaced: true
+
+configSource: file
+
+config:
+  # Slinky's slurmrestd serves plain HTTP on 6820 (TLS is expected to be
+  # fronted by a sidecar/ingress in production). This test cluster has no
+  # such front, so we use http:// + allowInsecureHTTP. In a real deployment
+  # keep https:// and terminate TLS in front of slurmrestd — found live
+  # (experiment 09).
+  slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
+  allowInsecureHTTP: true
+  slurmTokenFile: "/var/run/secrets/slurm/token"
+  slurmUser: "" # token-only auth (the JWT is minted for "slurm"); "k8s-bridge" is not a real Slurm user and 422s all job updates
+  namespace: "slurm-jobs"
+  localQueue: "main"
+  pollInterval: "10s"
+  maxUserPriority: 10000
+  # CreateWorkers (P5): default is 8. Raised here because this run drives 500
+  # concurrent admissions plus a 3000-job backlog — the worker pool bounds how
+  # many ensureJobSet calls run in parallel per tick; the client-go QPS/Burst
+  # ceiling in main.go still caps actual API throughput regardless of this
+  # value (see internal/config/config.go comment on
+  # CreateWorkers), so raising it is safe and should just reduce queueing
+  # inside the bridge itself.
+  createWorkers: 32
+  partitionMappings:
+    - partitionName: "mixing-gpu"
+      workloadPriorityClass: "normal-priority"
+      localQueue: "gpu-queue" # routes GPU-partition JobSets to the GPU-scoped LocalQueue (manifests/kueue-gpu-queue.yaml)
+  slurmd:
+    image: "ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04"
+    confServer: "slurm-controller.slurm.svc.cluster.local:6817"
+    authSecretName: "slurm-auth-slurm"
+    # gpuResourceName left unset -> defaults to "nvidia.com/gpu" in
+    # ApplyDefaults() (config.go), matching the simulated resource this
+    # experiment's gpu-sim-patcher DaemonSet advertises (scripts/10-simulate-gpus.sh).
+    # gpuResourceName: "nvidia.com/gpu"
+
+slurmTokenSecret: "slurm-rest-token"

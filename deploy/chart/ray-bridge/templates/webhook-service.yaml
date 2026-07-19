@@ -1,0 +1,22 @@
+{{- /*
+Fronts the webhook server's port (9443, only opened on the container when
+webhook.enabled=true — see templates/deployment.yaml). Namespace-parameterized
+via .Release.Namespace, unlike the standalone deploy/ray-bridge/webhook.yaml,
+which hardcodes namespace "ray".
+*/}}
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ray-bridge.webhookServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ray-bridge.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "ray-bridge.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 443
+      targetPort: webhook
+      protocol: TCP
+{{- end }}
