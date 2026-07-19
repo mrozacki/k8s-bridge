@@ -1,0 +1,16 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: inner-c
+  namespace: ray
+  # NOTE: When ray-bridge is deployed without the mutating admission webhook
+  # (e.g. basic chart install without cert-manager / webhook enabled), the
+  # pool annotation below is MANDATORY for ray-bridge to reconcile this workload.
+  # If the webhook is active, this annotation is injected automatically.
+  annotations:
+    ray-bridge.x-k8s.io/pool: "batch"
+spec:
+  entrypoint: "python -c \"import socket; print('INNER_C_RAN_ON=' + socket.gethostname())\""
+  entrypointResources: '{"wm-job-inner-c": 1}'
+  clusterSelector:
+    ray.io/cluster: shared-cluster

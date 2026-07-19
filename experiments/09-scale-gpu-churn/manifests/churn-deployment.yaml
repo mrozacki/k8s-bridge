@@ -1,0 +1,43 @@
+# Throwaway churn generator for scripts/30-churn.sh. Starts at 0 replicas;
+# the script scales it up/down in large steps and measures pods/sec from
+# observed timestamps. Deliberately cheap (pause container, minimal
+# requests) and isolated to the dedicated churn-pool node pool (see
+# experiments/09-scale-gpu-churn/scripts/01-create-cluster.sh) via
+# nodeSelector + toleration, so it cannot contend with the 500 "real" slurmd
+# pods or the GPU-sim quota for capacity while churn is measured.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: churn-generator
+  labels:
+    app: churn-generator
+    scale-test: churn
+spec:
+  replicas: 0
+  selector:
+    matchLabels: { app: churn-generator }
+  template:
+    metadata:
+      labels: { app: churn-generator, scale-test: churn }
+    spec:
+      # Registry k8s.gcr.io/pause is the canonical near-zero-footprint image
+      # (it is what every pod's infra container already runs) — cheapest
+      # possible pod for pure scheduling/churn pressure.
+      containers:
+        - name: churn
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { cpu: 10m, memory: 16Mi }
+      nodeSelector:
+        workload-mixing/churn: "true"
+      tolerations:
+        - key: workload-mixing/churn
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # Fast, unconditional teardown — churn pods carry no state and a graceful
+      # shutdown window would only slow down the delete half of each cycle,
+      # understating the achievable churn rate.
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Always

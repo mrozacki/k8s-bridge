@@ -1,0 +1,293 @@
+# VENDORED COPY for envtest (audit AUD1 schema-drift guard) — GENERATED, run
+# `make manifests`, do not edit. That target regenerates this copy together
+# with the canonical deploy/crd/workloadmixing-crd.yaml from the typed Go API
+# in api/v1alpha1 (ADR-0014), so integration_test.go's real-API-server test
+# keeps exercising the schema actually shipped, not a stale one.
+#
+# WorkloadMixing CRD (ADR-0004 promotion). The spec mirrors the prototype's
+# file config 1:1 — see config/example-config.yaml.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: workloadmixings.k8s-bridge.x-k8s.io
+spec:
+  group: k8s-bridge.x-k8s.io
+  names:
+    kind: WorkloadMixing
+    listKind: WorkloadMixingList
+    plural: workloadmixings
+    shortNames:
+    - wm
+    singular: workloadmixing
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .spec.localQueue
+      name: Queue
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              Bridge configuration, mirroring the file-mode config 1:1. The
+              controller watches this CR (one reconcile loop per CR in its own
+              namespace since ADR-0015; --workloadmixing namespace/name binds to a
+              single CR instead) and hot-reloads on every spec change; a reload
+              that fails validation is reported on status.conditions and the
+              controller keeps running on its previous, still-valid config. Two CRs
+              naming the same slurmRestURL AND an overlapping partition are refused
+              (Ready=False, reason ConflictingSpec) — they would double-manage jobs.
+            properties:
+              allowInsecureHTTP:
+                description: permit a plaintext http:// slurmRestURL (development
+                  only)
+                type: boolean
+              cancelOrphanedJobs:
+                description: |-
+                  cancel a released Slurm job whose JobSet has disappeared (D2).
+                  OFF by default: scancel is irreversible and keys off the ABSENCE
+                  of a JobSet, which a mis-scoped informer cache or lost RBAC on the
+                  workload namespace looks exactly like. Opt in once the deployment's
+                  cache scope is trusted.
+                type: boolean
+              createWorkers:
+                description: bounded worker pool size for parallel JobSet creation
+                  (P5); 0 (or omitted) defaults to 8
+                maximum: 256
+                minimum: 0
+                type: integer
+              drainOnPreemption:
+                description: |-
+                  proactively delete a preempted job's dynamic Slurm node records on Kueue
+                  eviction (ADR-0016), instead of waiting out SlurmdTimeout. OFF by default:
+                  it keys off a Kueue eviction signal and deletes node records, so a misread
+                  would requeue a healthy job (recoverable). SlurmdTimeout stays the backstop.
+                type: boolean
+              enablePrioritySync:
+                type: boolean
+              localQueue:
+                maxLength: 253
+                type: string
+              maxUserPriority:
+                description: cap on user-originated priority requests (0 disables
+                  the extra cap)
+                format: int32
+                maximum: 2147483647
+                minimum: 0
+                type: integer
+              orphanGraceTicks:
+                description: consecutive ticks a job must be seen without its JobSet
+                  before cancelOrphanedJobs acts; 0 (or omitted) defaults to 3
+                maximum: 100
+                minimum: 1
+                type: integer
+              partitionMappings:
+                items:
+                  properties:
+                    localQueue:
+                      maxLength: 253
+                      type: string
+                    partitionName:
+                      maxLength: 253
+                      type: string
+                    workloadPriorityClass:
+                      maxLength: 253
+                      type: string
+                  required:
+                  - partitionName
+                  - workloadPriorityClass
+                  type: object
+                maxItems: 256
+                minItems: 1
+                type: array
+              pollInterval:
+                description: Go duration, e.g. 10s; the controller also enforces a
+                  1s minimum
+                pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+                type: string
+              slurmCACertFile:
+                maxLength: 1024
+                type: string
+              slurmInsecureSkipTLSVerify:
+                type: boolean
+              slurmRequestTimeout:
+                description: |-
+                  per-request slurmrestd HTTP timeout (Go duration, default 30s;
+                  controller enforces 1s..10m). Raise for large backlogs: the
+                  GET /jobs payload grows with total queue depth. Read at
+                  startup only — a hot-reload change needs a controller restart.
+                pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+                type: string
+              slurmRequestsPerSecond:
+                description: |-
+                  client-side rate limit on ALL bridge requests to slurmrestd,
+                  in requests per second (0 or omitted = unlimited, the
+                  previous behavior). The limiter exists because slurmrestd
+                  was the fragile dependency in scale testing: it shares
+                  slurmctld's lock and has no throttling of its own, so an
+                  unpaced bridge burst can starve the scheduler itself. Burst
+                  is derived as 2x the rate (minimum 1). Read at startup only
+                  — a hot-reload change needs a controller restart.
+                maximum: 10000
+                minimum: 0
+                type: number
+              slurmRestURL:
+                maxLength: 2048
+                pattern: ^https?://
+                type: string
+              slurmTokenFile:
+                description: path to a mounted JWT for slurmrestd
+                maxLength: 1024
+                type: string
+              slurmUser:
+                maxLength: 64
+                type: string
+              slurmd:
+                properties:
+                  authSecretName:
+                    maxLength: 253
+                    type: string
+                  confServer:
+                    maxLength: 512
+                    type: string
+                  gpuResourceName:
+                    maxLength: 253
+                    type: string
+                  image:
+                    maxLength: 512
+                    type: string
+                  privileged:
+                    description: run slurmd privileged (default true; slurmd needs
+                      writable cgroups)
+                    type: boolean
+                  sharedStorage:
+                    properties:
+                      mountPath:
+                        maxLength: 1024
+                        pattern: ^/
+                        type: string
+                      nfsPath:
+                        maxLength: 1024
+                        pattern: ^/
+                        type: string
+                      nfsServer:
+                        maxLength: 253
+                        type: string
+                    type: object
+                required:
+                - authSecretName
+                - confServer
+                - image
+                type: object
+              topology:
+                properties:
+                  preferredLevel:
+                    maxLength: 316
+                    type: string
+                  requiredLevel:
+                    maxLength: 316
+                    type: string
+                type: object
+            required:
+            - localQueue
+            - partitionMappings
+            - slurmRestURL
+            - slurmd
+            type: object
+            x-kubernetes-validations:
+            - message: slurmRestURL must use https unless allowInsecureHTTP is set
+                (the Slurm token would travel in cleartext)
+              rule: self.slurmRestURL.startsWith('https://') || (has(self.allowInsecureHTTP)
+                && self.allowInsecureHTTP)
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

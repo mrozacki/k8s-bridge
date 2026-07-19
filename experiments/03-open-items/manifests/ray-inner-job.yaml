@@ -1,0 +1,15 @@
+# RayJob submitted INTO the existing shared cluster (clusterSelector mode).
+# Demonstrates the admission gap driving ADR-0006: this job starts
+# immediately, entirely invisible to Kueue — no quota, no priority, no
+# preemption. Compare with a Slurm job going through the bridge.
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: inner-job-demo
+  namespace: default
+spec:
+  clusterSelector:
+    ray.io/cluster: shared-ray
+  entrypoint: >-
+    python -c "import ray, time; ray.init(); print('inner job running on shared cluster'); time.sleep(30); print('done')"
+  submissionMode: K8sJobMode

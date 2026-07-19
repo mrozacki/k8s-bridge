@@ -1,0 +1,32 @@
+{{- /*
+Requires the prometheus-operator CRDs (monitoring.coreos.com/v1) to already
+be installed in-cluster — e.g. via the kube-prometheus-stack Helm chart, the
+same prerequisite deploy/monitoring/README.md documents for Kueue's own
+ServiceMonitor. `helm install`/`upgrade` with serviceMonitor.enabled=true and
+no such CRD installed fails outright (Helm cannot create an instance of a CRD
+kind the API server doesn't know about) — that failure is expected, not a
+bug in this chart.
+*/}}
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "k8s-bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "k8s-bridge.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | default "10s" }}
+{{- end }}

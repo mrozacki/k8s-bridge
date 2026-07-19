@@ -1,0 +1,86 @@
+k8s-bridge {{ .Chart.AppVersion }} has been installed/upgraded in namespace {{ .Release.Namespace }} (release {{ .Release.Name }}).
+
+1. Before the controller can reach Ready, confirm the slurmrestd token
+   Secret exists (this chart does NOT create it — the token is a
+   credential, not a chart-managed value):
+
+     kubectl get secret {{ .Values.slurmTokenSecret }} -n {{ .Release.Namespace }}
+
+   If it's missing, create it (see this chart's README "Prerequisites"):
+
+     kubectl create secret generic {{ .Values.slurmTokenSecret }} \
+       --from-file=token=./slurm.jwt -n {{ .Release.Namespace }}
+
+2. The slurmd pods this bridge CREATES mount the Slurm cluster's auth key
+   from a Secret in THIS namespace ({{ .Values.config.slurmd.authSecretName | default "slurm-auth-slurm" }}).
+   Kubernetes Secrets are namespace-scoped and this chart deliberately does
+   not sync credentials across namespaces, so copy it once from the Slurm
+   operator's namespace or translated jobs' pods will hang in
+   ContainerCreating with FailedMount (docs/installation.md §3.1):
+
+     kubectl get secret {{ .Values.config.slurmd.authSecretName | default "slurm-auth-slurm" }} -n <slurm-namespace> -o yaml \
+       | grep -v -E 'namespace:|resourceVersion:|uid:|creationTimestamp:' \
+       | kubectl apply -n {{ .Release.Namespace }} -f -
+
+3. Watch the rollout (the Deployment uses the Recreate strategy, so expect a
+   brief gap while the old pod terminates before the new one starts):
+
+     kubectl rollout status deployment/{{ include "k8s-bridge.fullname" . }} -n {{ .Release.Namespace }}
+
+4. Confirm the controller is actually Ready (not just Running) — the first
+   /readyz pass requires a successful slurmrestd reconcile tick, so this can
+   take up to ~20-35s after the pod starts:
+
+     kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+     kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "k8s-bridge.metricsServiceName" . }} 8080:{{ .Values.service.port | default 8080 }}
+     curl -s localhost:8080/readyz
+
+   A non-Ready pod after ~1 minute usually means slurmrestd is unreachable or
+   the token is stale — see docs/operations.md's "Token expiry" and
+   "slurmrestd TLS-vs-plain-HTTP mismatch" runbooks.
+
+5. Metrics are served on the Service created by this chart:
+
+     {{ include "k8s-bridge.metricsServiceName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port | default 8080 }}/metrics
+
+{{- if .Values.serviceMonitor.enabled }}
+   A ServiceMonitor is enabled, so a prometheus-operator Prometheus in this
+   cluster should pick this target up automatically (confirm on the
+   Prometheus /targets page).
+{{- else }}
+   serviceMonitor.enabled is false — enable it once prometheus-operator CRDs
+   are installed, or point a plain scrape_config at the Service above.
+{{- end }}
+{{- if .Values.prometheusRule.enabled }}
+   A PrometheusRule is also enabled — see templates/prometheusrule.yaml and
+   docs/operations.md's "Alerts (minimum viable set)" for what each rule
+   means and, for a few of them, what additional exporter they depend on.
+{{- end }}
+
+6. Full operational detail — SLOs, alert definitions, and validated runbooks
+   for every failure mode above — lives in docs/operations.md in the parent
+   repo. Start there before escalating anything you see in this output.
+
+{{- if eq .Values.configSource "cr" }}
+{{- if .Values.workloadmixing.name }}
+
+Note: configSource=cr (single-CR binding) — the controller is reading its
+configuration from the WorkloadMixing CR
+{{ .Values.workloadmixing.namespace | default .Release.Namespace }}/{{ .Values.workloadmixing.name }},
+not from a chart-rendered ConfigMap. Confirm that CR exists and matches the
+expected spec shape (deploy/crd/workloadmixing-sample.yaml). This is the
+compatibility path; leave workloadmixing.name empty to let ONE controller
+serve every WorkloadMixing in the release namespace instead (ADR-0015).
+{{- else }}
+
+Note: configSource=cr (supervisor mode, ADR-0015) — the controller watches
+EVERY WorkloadMixing CR in {{ .Release.Namespace }} and runs one reconcile
+loop per CR, started/stopped as CRs come and go. Create CRs matching
+deploy/crd/workloadmixing-sample.yaml in this namespace; each CR reports its
+own health on status.conditions (Ready), and /readyz aggregates across all
+of them (per-CR detail in the response body; an empty namespace is READY).
+Two CRs naming the same slurmRestURL AND an overlapping partition would
+double-manage jobs: the second is refused with Ready=False, reason
+ConflictingSpec, until one of the two specs changes.
+{{- end }}
+{{- end }}

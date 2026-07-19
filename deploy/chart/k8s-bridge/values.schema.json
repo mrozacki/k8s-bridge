@@ -1,0 +1,393 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "k8s-bridge Helm values",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "image",
+    "config",
+    "slurmTokenSecret"
+  ],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": [
+        "repository",
+        "pullPolicy"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "allowedSlurmdImages": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "resources": {
+      "type": "object"
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Deployment replica count. >1 only useful with leaderElect=true (the default) — extra replicas sit idle until they win the leader-election Lease."
+    },
+    "leaderElect": {
+      "type": "boolean"
+    },
+    "leaseDurationSeconds": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "description": "coordination.k8s.io Lease duration (--leader-lease-duration). Must be > renewDeadlineSeconds."
+    },
+    "renewDeadlineSeconds": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "description": "Leader renew deadline (--leader-renew-deadline). Must be < leaseDurationSeconds."
+    },
+    "nodeSelector": {
+      "type": "object",
+      "description": "Standard pod nodeSelector, passed through verbatim."
+    },
+    "tolerations": {
+      "type": "array",
+      "description": "Standard pod tolerations list, passed through verbatim."
+    },
+    "affinity": {
+      "type": "object",
+      "description": "Standard pod affinity object, passed through verbatim."
+    },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "description": "Standard pod topologySpreadConstraints list, passed through verbatim."
+    },
+    "podAnnotations": {
+      "type": "object",
+      "description": "Extra annotations merged onto the pod template (not the Deployment object)."
+    },
+    "podLabels": {
+      "type": "object",
+      "description": "Extra labels merged onto the pod template (not the Deployment object)."
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "minAvailable": {
+          "type": ["string", "integer"],
+          "description": "Mutually exclusive with maxUnavailable; takes precedence when non-empty."
+        },
+        "maxUnavailable": {
+          "type": ["string", "integer"],
+          "description": "Ignored when minAvailable is set to a non-empty value."
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Requires the prometheus-operator ServiceMonitor CRD (monitoring.coreos.com/v1) installed in-cluster.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "scrapeTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "labels": {
+          "type": "object"
+        }
+      }
+    },
+    "prometheusRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Requires the prometheus-operator PrometheusRule CRD (monitoring.coreos.com/v1) installed in-cluster.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "labels": {
+          "type": "object"
+        },
+        "rules": {
+          "type": "object",
+          "description": "Per-alert threshold overrides; see templates/prometheusrule.yaml and docs/operations.md for what each key controls."
+        }
+      }
+    },
+    "priorityClass": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "namespaced": {
+          "type": "boolean"
+        },
+        "extraNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "configSource": {
+      "type": "string",
+      "enum": [
+        "file",
+        "cr"
+      ]
+    },
+    "workloadmixing": {
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "slurmTokenSecret": {
+      "type": "string",
+      "minLength": 1
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slurmRestURL",
+        "namespace",
+        "localQueue",
+        "partitionMappings",
+        "slurmd"
+      ],
+      "properties": {
+        "slurmRestURL": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "allowInsecureHTTP": {
+          "type": "boolean"
+        },
+        "slurmCACertFile": {
+          "type": "string"
+        },
+        "slurmInsecureSkipTLSVerify": {
+          "type": "boolean"
+        },
+        "slurmTokenFile": {
+          "type": "string"
+        },
+        "slurmUser": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "localQueue": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pollInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "enablePrioritySync": {
+          "type": "boolean"
+        },
+        "maxUserPriority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "createWorkers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "partitionMappings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "partitionName",
+              "workloadPriorityClass"
+            ],
+            "properties": {
+              "partitionName": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workloadPriorityClass": {
+                "type": "string",
+                "minLength": 1
+              },
+              "localQueue": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "slurmd": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "image",
+            "confServer",
+            "authSecretName"
+          ],
+          "properties": {
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "confServer": {
+              "type": "string",
+              "minLength": 1
+            },
+            "authSecretName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "gpuResourceName": {
+              "type": "string"
+            },
+            "privileged": {
+              "type": "boolean"
+            },
+            "sharedStorage": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "nfsServer": {
+                  "type": "string"
+                },
+                "nfsPath": {
+                  "type": "string"
+                },
+                "mountPath": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "topology": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requiredLevel": {
+              "type": "string"
+            },
+            "preferredLevel": {
+              "type": "string"
+            }
+          }
+        },
+        "slurmRequestTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "description": "per-request slurmrestd HTTP timeout; controller enforces 1s..10m (default 30s)"
+        },
+        "slurmRequestsPerSecond": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "client-side rate limit toward slurmrestd (distinct from kubeClient.qps/burst, which governs kube-apiserver calls). 0 (default) = unlimited."
+        }
+      }
+    },
+    "kubeClient": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "client-go rate ceiling wired to --kube-api-qps/--kube-api-burst; burst must be >= qps",
+      "properties": {
+        "qps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

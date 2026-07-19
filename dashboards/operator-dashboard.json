@@ -1,0 +1,469 @@
+{
+  "__comment": "Operator/on-call Grafana dashboard (backlog A3) — companion to dashboards/researcher-dashboards.json, which is researcher-facing and has zero bridge-sourced panels. Every k8s_bridge_* and ray_bridge_* series here was verified against internal/metrics/metrics.go and internal/raybridge/metrics.go; kueue_* series were verified against deploy/monitoring/README.md's documented ServiceMonitor scrape of kueue-controller-manager. Panels are organized so the state behind each of the 7 alerts in deploy/chart/k8s-bridge/templates/prometheusrule.yaml is visible somewhere on this page (tick failures, control-plane readiness, jobs-failed, leader election) — see docs/operations.md for the on-call runbooks referenced in panel descriptions. Dashboard-as-code, render validation pending on first import: unlike the researcher dashboard (validated against a live Grafana), this dashboard has never been rendered. Import into any Grafana with a Prometheus datasource scraping k8s-bridge, ray-bridge (if deployed), and kueue-controller-manager /metrics endpoints.",
+  "title": "Workload mixing — operator / on-call view",
+  "uid": "wm-operators",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Health",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Bridge leader status",
+      "description": "leader_election_master_status across k8s-bridge replicas. 0 on every replica for >=2m fires alert K8sBridgeLeaderElectionLost (prometheusrule.yaml #7) — no replica holds the Lease, the reconcile loop is not running anywhere. See docs/operations.md's alert list.",
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "max(leader_election_master_status{job=~\".*k8s-bridge.*\"})",
+          "legendFormat": "leader"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tick rate & tick error ratio",
+      "description": "k8s_bridge_ticks_total is the denominator, k8s_bridge_tick_errors_total the numerator of the error-tick-ratio SLO (docs/operations.md, target <1% over 1h). >=3 failed ticks in a short window fires K8sBridgeTickFailuresHigh (prometheusrule.yaml #1) — check slurmrestd reachability and JWT token expiry first (docs/operations.md 'Token expiry' runbook).",
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 6,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(k8s_bridge_ticks_total[5m]))",
+          "legendFormat": "tick rate (per s)"
+        },
+        {
+          "expr": "sum(rate(k8s_bridge_tick_errors_total[5m])) / sum(rate(k8s_bridge_ticks_total[5m]))",
+          "legendFormat": "error ratio"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tick duration p50/p95/p99",
+      "description": "Wall-clock time for one full reconcile tick (ListJobs + snapshot + admit + cleanup). A rising p99 alongside a rising SlurmRequestDuration below usually means slurmrestd is the bottleneck, not the bridge itself.",
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 15,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(k8s_bridge_tick_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(k8s_bridge_tick_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(k8s_bridge_tick_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Slurm API",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Slurm API request rate by method/code",
+      "description": "Every slurmrestd call the bridge makes, labeled by HTTP method and response code (bounded cardinality — never by URL/job ID). A rising non-2xx share alongside tick failures points at slurmrestd/token problems (docs/operations.md 'Token expiry' runbook).",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(k8s_bridge_slurm_api_requests_total[5m])) by (method, code)",
+          "legendFormat": "{{method}} {{code}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Slurm request duration p95",
+      "description": "Per-request slurmrestd latency by method, including reading the full response body. Use alongside slurmRequestTimeout/slurmRequestsPerSecond config to judge whether a raised timeout or client-side rate limit is actually needed (docs/operations.md).",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(k8s_bridge_slurm_request_duration_seconds_bucket[5m])) by (le, method))",
+          "legendFormat": "{{method}} p95"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Slurm jobs listed vs held jobs",
+      "description": "k8s_bridge_slurm_jobs_listed is every job returned by the most recent /jobs poll (all states) — the payload size the bridge must parse each tick; alert on sustained growth before it outpaces memory limits (docs/operations.md large-scale runbook: OOM risk above ~5,000 backlog jobs). k8s_bridge_held_jobs is just the held+pending admission backlog.",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "k8s_bridge_slurm_jobs_listed",
+          "legendFormat": "jobs listed (all states)"
+        },
+        {
+          "expr": "k8s_bridge_held_jobs",
+          "legendFormat": "held+pending jobs"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Lifecycle",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "JobSets created/deleted rate",
+      "description": "JobSet lifecycle events, deliberately unlabeled by JobSet name/job ID (cardinality). A sustained gap between created and deleted rates is expected while the backlog grows or drains; a delete rate with no matching create rate can indicate orphan cleanup (see the safety-guard row below).",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(k8s_bridge_jobsets_created_total[5m]))",
+          "legendFormat": "created"
+        },
+        {
+          "expr": "sum(rate(k8s_bridge_jobsets_deleted_total[5m]))",
+          "legendFormat": "deleted"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "JobSet create errors (5m rate)",
+      "description": "Per-job JobSet creation failures during the parallel create phase. One failure is isolated to its own job and does not abort the rest of the tick, but the tick still returns an aggregate error — a sustained nonzero rate here is worth investigating even though no single alert covers it directly.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(k8s_bridge_jobset_create_errors_total[5m]))",
+          "legendFormat": "create errors/s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Job release latency p95",
+      "description": "Time from a Slurm job first observed held+pending to being released onto its dynamic nodes — feeds the release-latency SLO (docs/operations.md, target p99 < 2x pollInterval).",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(k8s_bridge_job_release_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Jobs failed (5m rate)",
+      "description": "Slurm jobs the bridge actively failed because their JobSet reported a Failed condition (D1). Any increase fires K8sBridgeJobsFailedIncreasing (prometheusrule.yaml #6) — see docs/operations.md's D1 runbook 'JobSet dead, Slurm job pending forever'.",
+      "gridPos": {
+        "h": 7,
+        "w": 3,
+        "x": 18,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(k8s_bridge_jobs_failed_total[5m]))",
+          "legendFormat": "jobs failed/s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tick triggers by source",
+      "description": "What caused each tick to run: 'timer' is the periodic poll floor, 'watch' is a JobSet/Workload event nudging an immediate tick. Informational only — not yet an SLO target (docs/operations.md).",
+      "gridPos": {
+        "h": 7,
+        "w": 3,
+        "x": 21,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(k8s_bridge_tick_trigger_total[5m])) by (source)",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Safety guards",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      }
+    },
+    {
+      "type": "stat",
+      "title": "JobSet identity conflicts (15m)",
+      "description": "Non-zero means a reused Slurm job ID collided with an existing JobSet created for a DIFFERENT incarnation of that ID; the bridge refuses to adopt or delete on conflict, so the job sits parked awaiting an operator. See docs/operations.md's k8s_bridge_jobset_identity_conflicts_total note.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(k8s_bridge_jobset_identity_conflicts_total[15m]))",
+          "legendFormat": "conflicts"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Orphaned jobs cancelled (15m)",
+      "description": "Slurm jobs cancelled because their JobSet no longer exists (D2) — distinct from 'jobs failed' above, which fires on a JobSet Failed CONDITION rather than its absence. A small trickle can be normal cleanup; a sudden spike can mean the bridge lost sight of its own JobSets. See docs/operations.md's D1/D2 notes.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(k8s_bridge_orphaned_jobs_cancelled_total[15m]))",
+          "legendFormat": "orphans cancelled"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Orphan cancellations refused (15m)",
+      "description": "Non-zero means the partial-cache guard refused to cancel orphan candidates because too large a fraction of managed jobs looked orphaned at once — the signature of a partially-visible informer cache, not genuine mass orphanhood. Investigate cache/RBAC health immediately; see docs/operations.md's orphan-cancellation guard note.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(k8s_bridge_orphan_cancellations_refused_total[15m]))",
+          "legendFormat": "refused"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "ray-bridge",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker JobSets created/failed rate",
+      "description": "ray_bridge_* series — only present if the ray-bridge binary is deployed (separate metrics namespace/endpoint from k8s-bridge; absent otherwise). A growing gap between created and failed rates flags a create/fail loop; see docs/operations.md's ray_bridge_worker_jobsets_* notes.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 31
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ray_bridge_worker_jobsets_created_total[5m]))",
+          "legendFormat": "created"
+        },
+        {
+          "expr": "sum(rate(ray_bridge_worker_jobsets_failed_total[5m]))",
+          "legendFormat": "failed"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "ray-bridge reconcile errors (5m rate)",
+      "description": "Errors from the ray-bridge Reconciler, requeued by controller-runtime. Absent if ray-bridge is not deployed. A sustained nonzero rate means some RayJob is wedged in retry.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 31
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ray_bridge_reconcile_errors_total[5m]))",
+          "legendFormat": "reconcile errors/s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook decisions by outcome",
+      "description": "Only populated when the ray-bridge admission webhook is enabled (--enable-webhook, off by default); absent otherwise. A flat 'pinned' rate with ongoing RayJob submissions and no 'denied'/'skipped' activity is the operational smoking gun for a webhook-disabled bypass. See docs/operations.md's ray_bridge_webhook_decisions_total note.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 31
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ray_bridge_webhook_decisions_total[5m])) by (decision)",
+          "legendFormat": "{{decision}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Kueue context",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pending workloads",
+      "description": "kueue_pending_workloads sustained >0 for 30m in a mixing queue fires K8sBridgeWorkloadPendingTooLong (prometheusrule.yaml #2) — capacity starvation or a misconfigured quota. Scraped via the ServiceMonitor documented in deploy/monitoring/README.md.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "targets": [
+        {
+          "expr": "kueue_pending_workloads",
+          "legendFormat": "{{cluster_queue}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Admitted workloads (rate)",
+      "description": "Admission throughput per queue — kueue_admitted_workloads_total, the same series the researcher dashboard's serving-team row uses. Scraped via the same kueue-controller-manager ServiceMonitor documented in deploy/monitoring/README.md.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kueue_admitted_workloads_total[10m])) by (cluster_queue)",
+          "legendFormat": "{{cluster_queue}}"
+        }
+      ]
+    },
+    {
+      "title": "Since last good tick",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
+      "datasource": null,
+      "description": "Seconds since the bridge last completed a successful reconcile tick (time() - k8s_bridge_last_successful_tick_timestamp_seconds). This is the honest staleness signal: it keeps growing when the bridge stops doing useful work, unlike counters whose scrape timestamps stay fresh. If this exceeds ~3x the poll interval, readiness is already withdrawing — see the BridgeNotReady runbook in docs/operations.md.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "time() - k8s_bridge_last_successful_tick_timestamp_seconds",
+          "legendFormat": "staleness",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": []
+  }
+}

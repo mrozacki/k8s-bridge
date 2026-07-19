@@ -1,0 +1,124 @@
+# Values for oci://ghcr.io/slinkyproject/charts/slurm — scale + GPU-churn
+# cluster. Extends the pattern validated in
+# experiments/01-gke-playground/manifests/slurm-values.yaml (GresTypes,
+# ReturnToService, SlurmdTimeout, job_submit.lua auto-hold) with a dedicated
+# GPU partition ("mixing-gpu") so scripts/20-scale-backlog.sh's
+# --gres=gpu:1 jobs land somewhere the bridge is actually watching
+# (bridge-values-scale.yaml maps partitionName: mixing-gpu).
+#
+# gres.conf stays count-only (`Count=1`, no File=) — this is the LIVE,
+# VALIDATED mechanism from ADR-0010: gres File= is required for
+# slurmd to accept a GPU GRES type at all, but File-based device
+# verification is what we are deliberately avoiding (no real device nodes
+# exist). Count-only lets slurmd's GRES accounting work without checking for
+# a device file — see ADR-0010 and the header comment in
+# experiments/01-gke-playground/manifests/slurm-values.yaml for the two
+# Slurm gotchas this encodes (gpu GRES requires File= UNLESS count-only;
+# configless does not distribute gres.conf, hence configFiles below).
+
+nodesets:
+  slinky:
+    replicas: 1
+    slurmd:
+      resources:
+        requests: { cpu: "1", memory: 2Gi }
+        limits: { cpu: "1", memory: 2Gi }
+
+partitions:
+  all:
+    enabled: true
+    nodesets: ["ALL"]
+    configMap:
+      Default: "YES"
+      MaxTime: UNLIMITED
+  # Workload-mixing GPU partition: jobs submitted here with --gres=gpu:1 are
+  # auto-held (job_submit.lua below) and translated by the bridge into
+  # JobSets requesting the simulated nvidia.com/gpu extended resource.
+  mixing-gpu:
+    enabled: true
+    nodesets: ["ALL"]
+    configMap:
+      State: UP
+      MaxTime: UNLIMITED
+
+controller:
+  extraConfMap:
+    GresTypes: gpu
+    ReturnToService: "2"
+    SlurmdTimeout: "60"
+    # L1 fix (2026-07-06): this
+    # is the exact gap the live run hit — 20 slurmd pods reached
+    # Running but never registered as dynamic nodes (sinfo showed only the
+    # static worker), so the bridge correctly (per ADR-0005) never released
+    # the held jobs. Root cause confirmed against upstream Slurm docs
+    # (slurm.schedmd.com/dynamic_nodes.html) AND the slurm-operator's own
+    # source (SlinkyProject/slurm-operator,
+    # internal/builder/controllerbuilder/controller_config.go, checked live
+    # this session): dynamic nodes ("slurmd -Z") require
+    # SelectType=select/cons_tres; Slurm's own upstream default when unset is
+    # select/linear, which cannot accept dynamic registrations at all. This
+    # values file never set SelectType, matching the same gap in
+    # experiments/01-gke-playground/manifests/slurm-values.yaml — see that
+    # file's longer comment for the full reasoning and source list.
+    # Confidence: HIGH. NOT yet re-validated live — needs a fresh GKE run
+    # (see this experiment's README "L1 fix" note).
+    SelectType: select/cons_tres
+    # MaxNodeCount is already hardcoded to 1024 by the slurm-operator itself
+    # and is not something this chart's extraConfMap can usefully override
+    # higher — 1024 comfortably covers this experiment's node counts (max
+    # ~520 seen live). Confidence: HIGH this was never the bottleneck here.
+    #
+    # TreeWidth=65533 ("disable fanout"): the classic dynamic-node
+    # recommendation (SLUG22 deck), but Slurm 23.11+ (we run 26.05)
+    # re-enabled fanout for dynamic/cloud nodes specifically, so this may no
+    # longer be strictly necessary. Kept as a defensive, documented-safe
+    # value at these node counts. Confidence: MEDIUM — flagged, not silently
+    # omitted or silently assumed correct.
+    TreeWidth: "65533"
+    JobSubmitPlugins: lua
+
+configFiles:
+  gres.conf: |
+    Name=gpu Count=1
+  job_submit.lua: |
+    local MIXING = { ["mixing-gpu"] = true }
+
+    function slurm_job_submit(job_desc, part_list, submit_uid)
+      local part = job_desc.partition or ""
+      if MIXING[part] then
+        if job_desc.array_inx ~= nil and job_desc.array_inx ~= "" then
+          slurm.log_user("workload-mixing: array jobs are not supported yet")
+          return slurm.ERROR
+        end
+        job_desc.priority = 0
+        job_desc.comment = "wm: held for admission by k8s-bridge"
+      end
+      return slurm.SUCCESS
+    end
+
+    local MAX_USER_PRIO = 10000
+
+    function slurm_job_modify(job_desc, job_rec, part_list, modify_uid)
+      local p = job_desc.priority
+      if MIXING[job_rec.partition or ""] and p ~= slurm.NO_VAL
+         and p > 0 and p < 4294967294 then
+        if p > MAX_USER_PRIO then
+          p = MAX_USER_PRIO
+          slurm.log_user("workload-mixing: priority request capped to " .. MAX_USER_PRIO)
+        end
+        job_desc.admin_comment = string.format("wm:prio=%u", p)
+        job_desc.priority = slurm.NO_VAL
+        slurm.log_info("workload-mixing: priority request forwarded to the admission controller")
+      end
+      return slurm.SUCCESS
+    end
+
+loginsets:
+  slinky:
+    enabled: true
+    service:
+      spec:
+        type: ClusterIP
+
+restapi:
+  replicas: 1

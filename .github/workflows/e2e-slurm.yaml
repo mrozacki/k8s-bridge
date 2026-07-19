@@ -1,0 +1,102 @@
+name: e2e-slurm
+
+# Real-Slurm kind e2e (test/e2e/run-real-slurm.sh): the full hold ->
+# translate -> admit -> register -> release -> cleanup lifecycle against a
+# REAL slurmctld + slurmrestd running as plain docker containers on the kind
+# network. This is the lifecycle coverage nightly.yaml's e2e-kind job
+# structurally lacks (its mock slurmrestd serves an empty job list) — see the
+# script header for the whole design, including why no privileged slurmd is
+# needed anywhere.
+#
+# FULLY VALIDATED, ALL GATES HARD (2026-07-12): the bootstrap grace period
+# is over. Run 29183294715 (workflow_dispatch, ubuntu-latest) passed ALL
+# stages S1-S7 — the complete held -> translate -> admit -> register ->
+# release -> COMPLETED -> cleanup lifecycle against a real slurmctld
+# 26.05.1 — after three runner-specific fixes (two-node kind topology,
+# per-node podCIDR routes, control-plane untaint; see the script's
+# VALIDATION log). HARD_ALL is therefore pinned "true" and the scheduled
+# run has NO continue-on-error: any stage failure fails the nightly, which
+# is the entire point of this gate.
+on:
+  schedule:
+    # 47 6 UTC daily: several hours after nightly.yaml's 03:17 so the two
+    # long jobs never contend for the repo's runner budget at once, and off
+    # the top of the hour for the same scheduling-pile-up reason as nightly.
+    - cron: "47 6 * * *"
+  workflow_dispatch: {}
+
+# Least privilege, matching ci.yaml/nightly.yaml: reading the repo and
+# uploading a workflow artifact need nothing beyond contents: read
+# (artifact upload uses the job's ephemeral token, not a permission here).
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: .
+
+jobs:
+  e2e-real-slurm:
+    name: kind e2e with real Slurm (see test/e2e/run-real-slurm.sh header)
+    runs-on: ubuntu-latest
+    # The docker pulls (3 Slurm images) + kind + JobSet/Kueue + the staged
+    # waits fit comfortably; the ceiling exists so a wedged Slurm wait can
+    # never pin a runner for the default 6 hours.
+    timeout-minutes: 45
+    steps:
+      # SHA pins reused from nightly.yaml/ci.yaml (SEC3; Dependabot keeps
+      # them current and preserves the version comments).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # Same pinned-kind install as nightly.yaml (including the checksum pin
+      # and the sudo-install workaround for the runner image's preinstalled
+      # root-owned kind binary — see nightly.yaml's comment for the history).
+      - name: install kind
+        env:
+          KIND_VERSION: v0.32.0
+          KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+        run: |
+          set -euo pipefail
+          curl -f --retry 3 -Lo "${RUNNER_TEMP}/kind" "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          kind version
+      - name: run real-Slurm e2e
+        env:
+          # Every stage is a hard gate since the 2026-07-12 full-green
+          # validation (header banner): S5-S7 regressions must fail the
+          # nightly, not scroll by inside a green run.
+          HARD_ALL: "true"
+          DIAG_DIR: ${{ github.workspace }}/e2e-slurm-diagnostics
+        run: ./test/e2e/run-real-slurm.sh
+      # The script collects its own diagnostics into DIAG_DIR on any stage
+      # failure (including soft ones). This step only adds what the script
+      # cannot know it should grab when it dies before its trap: raw docker
+      # and cluster state at the moment the job failed.
+      - name: collect last-resort diagnostics
+        if: failure()
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          mkdir -p e2e-slurm-diagnostics
+          docker ps -a                                > e2e-slurm-diagnostics/docker-ps.txt 2>&1
+          docker logs --tail 500 e2e-slurmctld        > e2e-slurm-diagnostics/slurmctld-final.log 2>&1
+          docker logs --tail 500 e2e-slurmrestd       > e2e-slurm-diagnostics/slurmrestd-final.log 2>&1
+          kind get clusters                           > e2e-slurm-diagnostics/kind-clusters.txt 2>&1
+          kubectl get all -A -o wide                  > e2e-slurm-diagnostics/all-objects.txt 2>&1
+          true
+      - name: upload diagnostics artifact
+        if: always()
+        # TODO: verify pin — no upload-artifact pin exists elsewhere in this
+        # repo yet; this SHA is upstream's v4.6.2 tag. Confirm it against
+        # https://github.com/actions/upload-artifact/releases before the
+        # first dispatch run (Dependabot will keep it current afterwards).
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-slurm-diagnostics
+          path: ${{ github.workspace }}/e2e-slurm-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7

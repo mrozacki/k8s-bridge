@@ -1,0 +1,187 @@
+# Values for oci://ghcr.io/slinkyproject/charts/slurm — playground sizing.
+#
+# Findings from `helm show values` (2026-07-04, chart deploys Slurm 26.05):
+# - auth secrets are created as `slurm-auth-slurm` (slurm.key) and
+#   `slurm-auth-jwt` (jwt.key);
+# - the loginset Service defaults to LoadBalancer — overridden to ClusterIP
+#   (no public exposure, no LB cost; we reach it with kubectl exec);
+# - accounting (slurmdbd+mariadb) stays disabled: completed jobs disappear
+#   from squeue after MinJobAge, which also exercises the bridge's
+#   "job unknown => terminal" cleanup path.
+
+# One static Slurm worker so classic (non-bridge) jobs can run in scenario D.
+nodesets:
+  slinky:
+    replicas: 1
+    slurmd:
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+
+partitions:
+  # Static partition over the nodeset — for classic Slurm jobs.
+  all:
+    enabled: true
+    nodesets:
+      - ALL
+    configMap:
+      Default: "YES"
+      MaxTime: UNLIMITED
+  # Workload-mixing partition: jobs are submitted here with --hold and run on
+  # dynamic nodes created per job (experiments 02/03). The chart validation
+  # rejects a partition without NodeSets ("must contain at least one NodeSet
+  # (or ALL)"), so we use ALL and rely on the per-job Feature constraint
+  # (nodes-for-<id>) to keep bridge jobs off the static nodeset.
+  mixing:
+    enabled: true
+    nodesets:
+      - ALL
+    configMap:
+      State: UP
+      MaxTime: UNLIMITED
+  mixing-high:
+    enabled: true
+    nodesets:
+      - ALL
+    configMap:
+      State: UP
+      MaxTime: UNLIMITED
+  mixing-gpu:
+    enabled: true
+    nodesets:
+      - ALL
+    configMap:
+      State: UP
+      MaxTime: UNLIMITED
+
+# slurm.conf extensions — all three are live findings:
+# - GresTypes: without it sbatch rejects --gres=gpu:N outright;
+# - ReturnToService=2: without it dynamic nodes that vanished (preemption!)
+#   stay DOWN after re-registration and need manual `scontrol update
+#   state=resume`;
+# - SlurmdTimeout=60: default 300 s means Slurm needs 5 minutes to notice
+#   evicted nodes and requeue their job — 60 s tightens the preemption
+#   recovery loop for bridge-style dynamic nodes.
+#
+# L1 fix (2026-07-06): in the
+# live run, 20 slurmd pods reached Running but never registered as
+# dynamic Slurm nodes (sinfo only ever showed the static worker). Root cause,
+# confirmed by inspecting both Slurm's own docs (slurm.schedmd.com/
+# dynamic_nodes.html) and the slurm-operator's own rendered Controller CR
+# (`helm template ... slinky.slurm.net/v1beta1 Controller`, checked live this
+# session): dynamic nodes ("slurmd -Z") are ONLY supported under
+# SelectType=select/cons_tres — Slurm's OWN upstream default, if unset, is
+# select/linear, which silently cannot accept dynamic registrations. Grepping
+# the slurm-operator source (SlinkyProject/slurm-operator,
+# internal/builder/controllerbuilder/controller_config.go) confirms the
+# operator hardcodes MaxNodeCount=1024 already (so MaxNodeCount was NOT the
+# gap — 1024 comfortably covers the 20/520 nodes seen in this experiment) but
+# never sets SelectType at all. Our own extraConfMap never set it either —
+# that is the config gap. Confidence: HIGH (verified against three
+# independent sources: upstream Slurm docs, the operator's own source, and
+# this experiment's rendered Controller CR showing the missing key). This has
+# NOT been re-validated live yet — needs a fresh GKE run to fully confirm the
+# fix (see experiments/09-scale-gpu-churn/README.md "L1 fix" note).
+controller:
+  extraConfMap:
+    GresTypes: gpu
+    ReturnToService: "2"
+    JobRequeue: "1"
+    SlurmdTimeout: "60"
+    # L1 fix: dynamic-node registration requires the cons_tres select
+    # plugin. Confidence: HIGH (see note above — this is the confirmed root
+    # cause of the registration failure).
+    SelectType: select/cons_tres
+    # L1 fix: MaxNodeCount is ALREADY hardcoded to 1024 by the slurm-operator
+    # itself (internal/builder/controllerbuilder/controller_config.go) and
+    # is not exposed as an extraConfMap override target the chart would
+    # honor over the operator's own value — no override added here.
+    # Confidence: HIGH that this was never the bottleneck at our scale
+    # (max ~520 nodes in experiment 09 vs. the operator's built-in 1024).
+    #
+    # L1 fix: TreeWidth=65533 ("disable fanout") is the classically-cited
+    # dynamic-node requirement (SLUG22 Dynamic Nodes deck), but Slurm 23.11+
+    # (we are on 26.05) re-enabled fanout specifically for dynamic/cloud
+    # nodes, so this is likely no longer strictly required. Added defensively
+    # anyway since it is a documented safe value for dynamic environments and
+    # costs nothing at our node counts. Confidence: MEDIUM (may be
+    # unnecessary at 26.05, but not harmful) — flagging rather than omitting
+    # per the instruction to not guess silently.
+    TreeWidth: "65533"
+    # Phase A: auto-hold via the lua JobSubmit plugin (script below) —
+    # users no longer need to remember `sbatch --hold`.
+    JobSubmitPlugins: lua
+
+# job_submit.lua implements the MVD's JobSubmit plugin duties for mixing
+# partitions: auto-hold (priority=0), reject array jobs, and allow only
+# priority mutations after submit.
+configFiles:
+  # Count-only GRES declaration (no File=): slurmd skips device
+  # verification, enabling SIMULATED GPUs (fake extended resource on the
+  # K8s node) to exercise the full GRES chain without hardware.
+  gres.conf: |
+    Name=gpu
+  job_submit.lua: |
+    local MIXING = { mixing = true, ["mixing-high"] = true, ["mixing-gpu"] = true }
+
+    function slurm_job_submit(job_desc, part_list, submit_uid)
+      local part = job_desc.partition or ""
+      if MIXING[part] then
+        if job_desc.array_inx ~= nil and job_desc.array_inx ~= "" then
+          slurm.log_user("workload-mixing: array jobs are not supported yet")
+          return slurm.ERROR
+        end
+        job_desc.priority = 0
+        job_desc.comment = "wm: held for admission by k8s-bridge"
+      end
+      return slurm.SUCCESS
+    end
+
+    -- Defense-in-depth cap on user-requested priority (security audit H1). The
+    -- bridge enforces the authoritative cap (config maxUserPriority); this local
+    -- clamp keeps an absurd value from ever entering the directive channel. Keep
+    -- the two in sync with the deployed config.
+    local MAX_USER_PRIO = 10000
+
+    function slurm_job_modify(job_desc, job_rec, part_list, modify_uid)
+      -- ADR-0009: turn `scontrol update priority=N` into a bridge directive.
+      -- Slurm's own priority field stays untouched (it is scheduler-owned);
+      -- the bridge reads admin_comment and patches the Kueue Workload.
+      -- Intercept ONLY plain user priorities. Live finding:
+      -- hold (0) and release (INFINITE=0xFFFFFFFE) are ALSO delivered as
+      -- priority updates through this hook - swallowing them makes jobs
+      -- permanently unreleasable (scontrol release AND slurmrestd both).
+      local p = job_desc.priority
+      if MIXING[job_rec.partition or ""] and p ~= slurm.NO_VAL
+         and p > 0 and p < 4294967294 then
+        if p > MAX_USER_PRIO then
+          p = MAX_USER_PRIO
+          slurm.log_user("workload-mixing: priority request capped to " .. MAX_USER_PRIO)
+        end
+        job_desc.admin_comment = string.format("wm:prio=%u", p)
+        job_desc.priority = slurm.NO_VAL
+        -- known finding: slurm.log_user always prepends "error:" when
+        -- called from job_submit/job_modify context, even at plain log
+        -- level - a known Slurm quirk. This is the SUCCESS path (the
+        -- directive was accepted and forwarded), so log_info (controller
+        -- log only) avoids showing the user a misleading "error:" line for
+        -- something that isn't an error. Real error paths above still use
+        -- log_user so the user keeps seeing those.
+        slurm.log_info("workload-mixing: priority request forwarded to the admission controller")
+      end
+      return slurm.SUCCESS
+    end
+
+loginsets:
+  slinky:
+    enabled: true
+    service:
+      spec:
+        type: ClusterIP # default is LoadBalancer — see header note
+
+restapi:
+  replicas: 1

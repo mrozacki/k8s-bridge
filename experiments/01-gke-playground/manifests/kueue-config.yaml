@@ -1,0 +1,65 @@
+# Kueue queuing topology for the playground.
+#
+# One ResourceFlavor (we only have one node type), one ClusterQueue holding
+# the whole shared pool, and LocalQueues in the namespaces that submit work.
+# Quotas are sized for 2-4 e2-standard-4 nodes; adjust with the node pool.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: spot-e2
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: main-queue
+spec:
+  namespaceSelector: {} # accept workloads from any namespace with a LocalQueue
+  preemption:
+    withinClusterQueue: LowerPriority # higher-priority workloads may evict lower ones
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: spot-e2
+          resources:
+            - name: cpu
+              nominalQuota: 12      # leave headroom for system pods on 4 nodes
+            - name: memory
+              nominalQuota: 48Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: main
+  namespace: default
+spec:
+  clusterQueue: main-queue
+---
+# Namespace where k8s-bridge (and the manual simulation) creates slurmd JobSets.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: slurm-jobs
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: main
+  namespace: slurm-jobs
+spec:
+  clusterQueue: main-queue
+---
+# Priority classes referenced by the partition mapping (see the MVD document:
+# Slurm partitions map to WorkloadPriorityClasses).
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: high-priority
+value: 1000
+description: "Slurm 'high' partition and latency-sensitive serving"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: normal-priority
+value: 100
+description: "Default for batch workloads (Slurm 'main' partition, K8s Jobs, Ray)"

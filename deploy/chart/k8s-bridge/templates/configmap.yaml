@@ -1,0 +1,12 @@
+{{- if eq .Values.configSource "file" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "k8s-bridge.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-bridge.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+{{ .Values.config | toYaml | indent 4 }}
+{{- end }}

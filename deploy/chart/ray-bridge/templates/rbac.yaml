@@ -1,0 +1,71 @@
+{{- if .Values.rbac.create }}
+{{- /*
+Least-privilege RBAC for ray-bridge (namespaced — the controller's cache is
+scoped to both its own namespace and the configured workload namespace).
+Inner RayJobs: read + patch spec.suspend / entrypointResources. Worker JobSets:
+create/delete. Kueue Workloads: read. Events + leader-election Leases as usual.
+
+A Role/RoleBinding is rendered in every namespace the cache watches: the
+release namespace (where the leader-election Lease lives, POD_NAMESPACE) and
+config.namespace (where the RayJobs/JobSets/Workloads live). When the chart is
+installed directly into the workload namespace the two collapse to one via
+uniq — the previously validated single-namespace deployment is unchanged. The
+extra Role matters once ray-bridge runs in a dedicated system namespace while
+watching an external workload namespace (cmd/ray-bridge/main.go scopes the
+cache to both), which would otherwise fail cache sync with a "forbidden" error
+on the workload namespace.
+
+Do NOT "tighten" the release-namespace Role down to coordination.k8s.io/leases
+alone. Leader election does not go through the informer cache, so leases would
+be enough IF the release namespace were not watched — but it is: the cache is
+scoped to both namespaces and WorkloadNudgeSource is handed the whole cache, so
+Workload/JobSet informers are created there too. A leases-only Role fails cache
+sync and the pod never becomes Ready. Narrowing this safely means first dropping
+POD_NAMESPACE from the cache; that needs live-cluster validation (RBAC is not
+enforced under envtest). See docs/VALIDATION.md for the relevant live-cluster
+findings.
+*/}}
+{{- $namespaces := list .Release.Namespace .Values.config.namespace | uniq -}}
+{{- range $ns := $namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "ray-bridge.fullname" $ }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ray-bridge.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: ["ray.io"]
+    resources: ["rayjobs"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ray-bridge.fullname" $ }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ray-bridge.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ray-bridge.fullname" $ }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ray-bridge.fullname" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,63 @@
+# RayService: inference as ONE unit — a Serve app whose replicas autoscale
+# between 1 and 3 based on load (ADR-0006 position: serving does not queue
+# through Kueue; it scales elastically and is protected by priority).
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: demo-service
+  namespace: default
+spec:
+  serveConfigV2: |
+    applications:
+      - name: fruit_app
+        import_path: fruit.deployment_graph
+        route_prefix: /fruit
+        runtime_env:
+          working_dir: "https://github.com/ray-project/test_dag/archive/78b4a5da38796123d9f9ffff59bab2792a043e95.zip"
+        deployments:
+          - name: MangoStand
+            autoscaling_config:
+              min_replicas: 1
+              max_replicas: 3
+              target_ongoing_requests: 0.1
+            ray_actor_options:
+              num_cpus: 0.3
+          - name: OrangeStand
+            num_replicas: 1
+            ray_actor_options:
+              num_cpus: 0.2
+          - name: PearStand
+            num_replicas: 1
+            ray_actor_options:
+              num_cpus: 0.2
+          - name: FruitMarket
+            num_replicas: 1
+            ray_actor_options:
+              num_cpus: 0.2
+  rayClusterConfig:
+    rayVersion: "2.46.0"
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray:2.46.0
+              resources:
+                requests: { cpu: "1", memory: 2Gi }
+                limits: { cpu: "1", memory: 2Gi }
+    workerGroupSpecs:
+      - groupName: serve
+        replicas: 1
+        minReplicas: 1
+        maxReplicas: 2
+        rayStartParams: {}
+        template:
+          spec:
+            containers:
+              - name: ray-worker
+                image: rayproject/ray:2.46.0
+                resources:
+                  requests: { cpu: "1", memory: 2Gi }
+                  limits: { cpu: "1", memory: 2Gi }

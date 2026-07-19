@@ -1,0 +1,10 @@
+apiVersion: v2
+name: ray-bridge
+description: Kueue-centric admission for KubeRay RayCluster inner workloads (sibling of k8s-bridge)
+type: application
+version: 0.2.0
+appVersion: "v0.2.0"
+# Same floor as the k8s-bridge chart, for the same reason (Kueue
+# Topology-Aware Scheduling / JobSet minimums) — not independently verified
+# against a live cluster below 1.29; ratify or lower once checked.
+kubeVersion: ">= 1.29.0-0"

@@ -1,0 +1,140 @@
+name: chart-ci
+
+# D1 (production-readiness backlog): before this workflow existed, a PR that
+# touches ONLY deploy/** (chart templates, values, CRDs) ran NO checks except
+# the DCO gate — ci.yaml's trigger is scoped to prototype/**, so a broken
+# chart (bad template, invalid values, malformed schema) could merge
+# undetected. This closes that gap for both charts (k8s-bridge, ray-bridge):
+# `helm lint --strict`, a `helm template` render check with default values
+# and (for k8s-bridge, the only chart that has one) the
+# values-gke-test.yaml overlay, and a values.schema.json well-formedness
+# check.
+#
+# D2 (production-readiness backlog): the WorkloadMixing CRD exists in three
+# hand-synced copies — deploy/crd/workloadmixing-crd.yaml (canonical),
+# deploy/chart/k8s-bridge/crds/workloadmixing-crd.yaml, and
+# test/crd/workloadmixing-crd.yaml — and one had already
+# drifted from the others before this gate existed. The crd-sync-gate job
+# below compares the three copies' `.spec` (headers/comments MAY differ
+# between copies; the spec MUST NOT) and fails, naming the drifted file(s),
+# if they disagree. Because the third copy lives outside deploy/**, this
+# workflow's path triggers explicitly include it too.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - "test/crd/workloadmixing-crd.yaml"
+      - ".github/workflows/chart-ci.yaml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "test/crd/workloadmixing-crd.yaml"
+      - ".github/workflows/chart-ci.yaml"
+
+# Least privilege, matching ci.yaml's stance: nothing here needs write
+# access to the repo or packages.
+permissions:
+  contents: read
+
+# Cancel a superseded run on the same ref (e.g. a fast-follow push to an open
+# PR) rather than letting redundant lint/template runs queue up.
+concurrency:
+  group: chart-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  helm-lint-template:
+    name: helm lint / template (${{ matrix.chart }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chart: [k8s-bridge, ray-bridge]
+    steps:
+      # SEC3 (SHA-pin GitHub Actions, matches ci.yaml): actions pinned to full
+      # commit SHAs, kept current by Dependabot, which preserves the trailing
+      # human-readable version comment on each bump.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Pinned to the latest Helm v3.x patch as of authoring. Helm v4 is
+          # out but not yet adopted anywhere in this repo's tooling; bumping
+          # this to a v4.x line is a deliberate future decision, not an
+          # implicit "latest" float.
+          version: v3.21.2
+
+      - name: helm lint --strict
+        run: helm lint "deploy/chart/${{ matrix.chart }}" --strict
+
+      - name: helm template (default values, render check only)
+        run: |
+          helm template test-release "deploy/chart/${{ matrix.chart }}" > /dev/null
+
+      # Only k8s-bridge ships a values-gke-test.yaml overlay (ray-bridge has
+      # no test-environment overrides file yet). The overlay deliberately
+      # blanks image.repository/tag so no private registry gets hardcoded in
+      # the repo, and values.schema.json requires them non-empty — so the
+      # render check must supply throwaway values the same way a real install
+      # supplies real ones.
+      - name: helm template (values-gke-test.yaml overlay, render check only)
+        if: matrix.chart == 'k8s-bridge'
+        run: |
+          helm template test-release deploy/chart/k8s-bridge \
+            -f deploy/chart/k8s-bridge/values-gke-test.yaml \
+            --set image.repository=example.invalid/k8s-bridge \
+            --set image.tag=ci-render-check > /dev/null
+
+  values-schema-json:
+    name: values.schema.json well-formedness (both charts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # jq is preinstalled on GitHub-hosted ubuntu runners; `jq empty` parses
+      # the file and does nothing else, so it fails iff the JSON is malformed.
+      - name: validate JSON syntax
+        run: |
+          jq empty deploy/chart/k8s-bridge/values.schema.json
+          jq empty deploy/chart/ray-bridge/values.schema.json
+
+  crd-sync-gate:
+    name: WorkloadMixing CRD sync gate (D2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # yq (mikefarah/yq) is preinstalled on GitHub-hosted ubuntu runners.
+      - name: compare .spec across the three synced CRD copies
+        run: |
+          set -euo pipefail
+
+          canonical="deploy/crd/workloadmixing-crd.yaml"
+          chart_copy="deploy/chart/k8s-bridge/crds/workloadmixing-crd.yaml"
+          test_copy="test/crd/workloadmixing-crd.yaml"
+
+          yq eval '.spec' "$canonical"  > /tmp/spec-canonical.yaml
+          yq eval '.spec' "$chart_copy" > /tmp/spec-chart.yaml
+          yq eval '.spec' "$test_copy"  > /tmp/spec-test.yaml
+
+          fail=0
+
+          if ! diff -u /tmp/spec-canonical.yaml /tmp/spec-chart.yaml > /tmp/diff-chart.txt; then
+            echo "::error file=${chart_copy}::${chart_copy} .spec has drifted from the canonical ${canonical}"
+            cat /tmp/diff-chart.txt
+            fail=1
+          fi
+
+          if ! diff -u /tmp/spec-canonical.yaml /tmp/spec-test.yaml > /tmp/diff-test.txt; then
+            echo "::error file=${test_copy}::${test_copy} .spec has drifted from the canonical ${canonical}"
+            cat /tmp/diff-test.txt
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::WorkloadMixing CRD copies are out of sync. The three copies" \
+                 "(${canonical}, ${chart_copy}, ${test_copy}) must be spec-identical" \
+                 "— headers/comments may differ, .spec may not. See the drifted file(s)" \
+                 "named above and sync them by hand."
+            exit 1
+          fi
+
+          echo "all three WorkloadMixing CRD copies have an identical .spec"

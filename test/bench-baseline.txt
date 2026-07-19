@@ -1,0 +1,58 @@
+# Benchmark regression baseline (backlog AUD5).
+#
+# Machine:  MacBook (Apple M5, darwin/arm64), local developer laptop — NOT a
+#           GitHub Actions runner. Absolute ns/op values below are therefore
+#           not comparable 1:1 to CI runner numbers; the CI gate (see
+#           .github/workflows/ci.yaml "benchmarks (regression)" step) compares
+#           CI-run-to-CI-run deltas via benchstat, not against this file's
+#           absolute numbers. This file exists so a human can see what
+#           "normal" looked like when the gate was introduced, and as the
+#           historical reference for retuning the regression threshold later.
+# Date:     2026-07-06
+# Go:       go1.26.4
+# Command:  go test -bench=. -benchtime=1000x -count=6 -run=NoTests ./internal/translate/...
+#           go test -bench=BenchmarkTick -benchtime=1000x -count=6 -run=NoTests ./internal/bridge/...
+#
+# Ratchet convention: this file is a point-in-time reference, not a hard
+# floor — regenerate it (same commands) whenever a deliberate performance
+# change lands, and update the Date/Go lines above. Do not hand-edit the
+# numbers.
+goos: darwin
+goarch: arm64
+pkg: github.com/mrozacki/k8s-bridge/internal/translate
+cpu: Apple M5
+BenchmarkToJobSet-10            	    1000	      3191 ns/op	    5368 B/op	      36 allocs/op
+BenchmarkToJobSet-10            	    1000	      2195 ns/op	    5363 B/op	      36 allocs/op
+BenchmarkToJobSet-10            	    1000	      2274 ns/op	    5363 B/op	      36 allocs/op
+BenchmarkToJobSet-10            	    1000	      2042 ns/op	    5364 B/op	      36 allocs/op
+BenchmarkToJobSet-10            	    1000	      2027 ns/op	    5363 B/op	      36 allocs/op
+BenchmarkToJobSet-10            	    1000	      1793 ns/op	    5363 B/op	      36 allocs/op
+BenchmarkGPUsPerNodeParse-10    	    1000	       102.6 ns/op	      80 B/op	       2 allocs/op
+BenchmarkGPUsPerNodeParse-10    	    1000	       105.1 ns/op	      80 B/op	       2 allocs/op
+BenchmarkGPUsPerNodeParse-10    	    1000	        94.79 ns/op	      80 B/op	       2 allocs/op
+BenchmarkGPUsPerNodeParse-10    	    1000	        93.67 ns/op	      80 B/op	       2 allocs/op
+BenchmarkGPUsPerNodeParse-10    	    1000	       103.2 ns/op	      80 B/op	       2 allocs/op
+BenchmarkGPUsPerNodeParse-10    	    1000	       103.6 ns/op	      80 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrozacki/k8s-bridge/internal/translate	0.447s
+goos: darwin
+goarch: arm64
+pkg: github.com/mrozacki/k8s-bridge/internal/bridge
+cpu: Apple M5
+BenchmarkTick-10    	    1000	  38555741 ns/op	48899654 B/op	  532034 allocs/op
+BenchmarkTick-10    	    1000	  38794019 ns/op	48887852 B/op	  532031 allocs/op
+BenchmarkTick-10    	    1000	  39049454 ns/op	48778237 B/op	  532031 allocs/op
+BenchmarkTick-10    	    1000	  38944370 ns/op	48767854 B/op	  532032 allocs/op
+BenchmarkTick-10    	    1000	  50218126 ns/op	48865207 B/op	  532031 allocs/op
+BenchmarkTick-10    	    1000	  45609359 ns/op	49026204 B/op	  532031 allocs/op
+PASS
+ok  	github.com/mrozacki/k8s-bridge/internal/bridge	255.853s
+
+# ray-bridge reconcile hot path (added 2026-07-07).
+# Command: go test -run '^$' -bench BenchmarkReconcileSteadyState -benchmem -count=3 ./internal/raybridge/
+# Note: ns/op is dominated by the fake client's get/list; the production cached
+# client is cheaper. This is a regression reference for the reconcile shape.
+pkg: github.com/mrozacki/k8s-bridge/internal/raybridge
+BenchmarkReconcileSteadyState-10    	    1496	    766148 ns/op	 1174881 B/op	    3845 allocs/op
+BenchmarkReconcileSteadyState-10    	    1513	    775272 ns/op	 1175045 B/op	    3847 allocs/op
+BenchmarkReconcileSteadyState-10    	    1555	    798276 ns/op	 1175317 B/op	    3851 allocs/op

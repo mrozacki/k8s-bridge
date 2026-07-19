@@ -1,0 +1,38 @@
+# Dependabot keeps dependencies patched — a baseline supply-chain control and an
+# OpenSSF Best-Practices expectation for CNCF projects. It watches the Go module
+# and the GitHub Actions used by CI.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Batch the many k8s.io/* and sigs.k8s.io/* modules so a version bump is
+      # one reviewable PR instead of a dozen.
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # D7 (production-readiness backlog): base-image bumps (e.g. golang:1.26,
+  # gcr.io/distroless/static-debian12) for both Dockerfiles in this
+  # directory (Dockerfile, Dockerfile.ray-bridge). Note: Dependabot's docker
+  # ecosystem is documented to scan a directory's root manifest; its handling
+  # of a second, non-canonically-named Dockerfile (Dockerfile.ray-bridge)
+  # alongside the standard `Dockerfile` in the same directory was not
+  # possible to confirm offline — verify after the first scheduled run that
+  # both files actually get PRs, and add a second directory-scoped block here
+  # if Dockerfile.ray-bridge turns out to be silently skipped.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

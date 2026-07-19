@@ -1,0 +1,67 @@
+# DWS (Dynamic Workload Scheduler) GPU Queued Provisioning reference manifests for GKE
+# Node pool must be created in GKE with:
+#   --enable-queued-provisioning --reservation-affinity=none --spot (or on-demand)
+# Workloads targeting GPU pools in GKE automatically require nvidia.com/gpu:NoSchedule tolerations.
+
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ProvisioningRequestConfig
+metadata:
+  name: dws-gpu-prc
+spec:
+  provisioningClassName: queued-provisioning.gke.io
+  parameters:
+    maxNodeCount: "4"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: AdmissionCheck
+metadata:
+  name: dws-gpu-check
+spec:
+  controllerName: kueue.x-k8s.io/provisioning-request
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: ProvisioningRequestConfig
+    name: dws-gpu-prc
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: dws-gpu-flavor
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: dws-gpu-qp
+  tolerations:
+    - key: "nvidia.com/gpu"
+      operator: "Exists"
+      effect: "NoSchedule"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: dws-gpu-cq
+spec:
+  namespaceSelector: {}
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: dws-gpu-check
+        onFlavors:
+          - dws-gpu-flavor
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+      flavors:
+        - name: dws-gpu-flavor
+          resources:
+            - name: cpu
+              nominalQuota: 16
+            - name: memory
+              nominalQuota: 64Gi
+            - name: nvidia.com/gpu
+              nominalQuota: 4
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: dws-gpu-lq
+  namespace: slurm-jobs
+spec:
+  clusterQueue: dws-gpu-cq

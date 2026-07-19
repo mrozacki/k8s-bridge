@@ -1,0 +1,142 @@
+name: release
+
+# D4 (production-readiness backlog): tag-triggered release pipeline. Runs the
+# release gate (build + `go test -race ./...`, kept lean — the full
+# fmt/vet/lint/vuln/integration/benchmark gauntlet already ran on the PR that
+# got merged to main; this is a fast re-validation of the exact tagged
+# commit, not a repeat of ci.yaml), then builds/pushes both images and both
+# charts, then cuts a GitHub Release.
+#
+# REGISTRY LOCATION IS A PLACEHOLDER DECISION for the engineering team:
+# images go to ghcr.io/${{ github.repository }}/{k8s-bridge,ray-bridge} and
+# charts to oci://ghcr.io/${{ github.repository_owner }}/charts because GHCR
+# is available to this repo with zero extra setup (just GITHUB_TOKEN). A
+# production rollout may prefer a dedicated registry (e.g. a cloud provider's
+# Artifact Registry, or a shared CNCF-hosted one) — revisit before GA.
+#
+# CHART appVersion / IMAGE TAG ALIGNMENT IS NOT AUTOMATIC. This workflow
+# tags images with the git tag and packages whatever `version`/`appVersion`
+# are already sitting in deploy/chart/*/Chart.yaml — it does not edit or
+# inspect them for agreement. The expected release flow that keeps them in
+# sync:
+#   1. Open a release PR that bumps deploy/chart/k8s-bridge/Chart.yaml and
+#      deploy/chart/ray-bridge/Chart.yaml (`version` and `appVersion`) to the
+#      version about to ship. Get it reviewed and merged to main.
+#   2. Tag that merged commit `vX.Y.Z` (matching the Chart.yaml bump) and
+#      push the tag. This workflow then builds/pushes images tagged
+#      `vX.Y.Z` + `latest`, and packages/pushes charts whose Chart.yaml
+#      already reads `vX.Y.Z` — so image tag and chart appVersion agree
+#      because step 1 set them together, not because this workflow enforces
+#      it.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least privilege at the workflow level; jobs that push images/charts or
+# create the release raise their own scope below.
+permissions:
+  contents: read
+
+# NOTE: deliberately no workflow-level `defaults.run.working-directory` here
+# (unlike ci.yaml/nightly.yaml) — this workflow mixes a job that operates
+# inside . (test, images) with jobs whose paths are
+# repo-root-relative (charts: deploy/chart/...). A single top-level default
+# would silently break one or the other, so each job/step sets its own
+# working-directory where it needs one.
+jobs:
+  test:
+    name: build + go test -race (release gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      # SEC3 (SHA-pin GitHub Actions, matches ci.yaml): actions pinned to full
+      # commit SHAs, kept current by Dependabot, which preserves the trailing
+      # human-readable version comment on each bump.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: build
+        run: go build ./...
+      - name: go test -race ./...
+        run: go test -race ./...
+
+  images:
+    name: build + push images
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build + push ghcr.io/${{ github.repository }}/k8s-bridge
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${{ github.repository }}/k8s-bridge"
+          docker build -f Dockerfile -t "${repo}:${GITHUB_REF_NAME}" -t "${repo}:latest" .
+          docker push "${repo}:${GITHUB_REF_NAME}"
+          docker push "${repo}:latest"
+      - name: build + push ghcr.io/${{ github.repository }}/ray-bridge
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${{ github.repository }}/ray-bridge"
+          docker build -f Dockerfile.ray-bridge -t "${repo}:${GITHUB_REF_NAME}" -t "${repo}:latest" .
+          docker push "${repo}:${GITHUB_REF_NAME}"
+          docker push "${repo}:latest"
+
+  charts:
+    name: package + push helm charts
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Kept in step with chart-ci.yaml's pin; see that file's header for
+          # the v3-vs-v4 note.
+          version: v3.21.2
+      - name: helm registry login (ghcr.io)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: helm package (both charts)
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/charts"
+          helm package deploy/chart/k8s-bridge -d "${RUNNER_TEMP}/charts"
+          helm package deploy/chart/ray-bridge -d "${RUNNER_TEMP}/charts"
+      - name: helm push (oci://ghcr.io/${{ github.repository_owner }}/charts)
+        run: |
+          set -euo pipefail
+          for pkg in "${RUNNER_TEMP}"/charts/*.tgz; do
+            helm push "$pkg" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          done
+
+  github-release:
+    name: create GitHub release
+    needs: [images, charts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # `gh` ships preinstalled on GitHub-hosted runners — no extra action
+      # pin needed to create the release.
+      - name: gh release create --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --title "${GITHUB_REF_NAME}"

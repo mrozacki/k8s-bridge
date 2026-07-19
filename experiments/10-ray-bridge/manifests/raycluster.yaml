@@ -1,0 +1,35 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: shared-cluster
+  namespace: ray
+spec:
+  rayVersion: '2.9.0'
+  # Autoscaling OFF: the shared mixing cluster's dedicated worker groups are
+  # managed externally by ray-bridge (as JobSets), so KubeRay's autoscaler must
+  # not fight them (ADR-0012 open item #3).
+  enableInTreeAutoscaling: false
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: rayproject/ray:2.9.0
+            resources:
+              requests:
+                cpu: "1"
+                memory: 2Gi
+              limits:
+                cpu: "1"
+                memory: 2Gi
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+  # No baseline worker groups: ray-bridge stands up dedicated workers per inner
+  # workload as Kueue-admitted JobSets.
+  workerGroupSpecs: []

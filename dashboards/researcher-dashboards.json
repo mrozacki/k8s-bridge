@@ -1,0 +1,37 @@
+{
+  "__comment": "Metric names LIVE-VALIDATED against Kueue v0.18.2. Grafana dashboard-as-code (dashboards over CLI). Three persona rows fed by Kueue + KubeRay metrics only. The bridge now exposes its own Prometheus metrics (k8s_bridge_tick_duration_seconds, k8s_bridge_ticks_total/_tick_errors_total, k8s_bridge_jobsets_created_total/_deleted_total, k8s_bridge_held_jobs, k8s_bridge_slurm_api_requests_total — see docs/operations.md), but this dashboard does not add bridge-sourced panels yet; that is backlog A3, not this change. Import into any Grafana with a Prometheus datasource scraping kueue-controller-manager, kuberay-operator, and (once A3 lands) the bridge. Render validated against a live Grafana deployment (see docs/VALIDATION.md and deploy/monitoring/README.md).",
+  "title": "Workload mixing — researcher view",
+  "uid": "wm-researchers",
+  "schemaVersion": 39,
+  "panels": [
+    { "type": "row", "title": "Slurm researcher — my team's picture", "gridPos": {"h":1,"w":24,"x":0,"y":0} },
+    { "type": "timeseries", "title": "Pending vs admitted workloads per queue", "gridPos": {"h":7,"w":12,"x":0,"y":1},
+      "targets": [
+        { "expr": "kueue_pending_workloads{cluster_queue=~\"$queue\"}", "legendFormat": "pending {{cluster_queue}}" },
+        { "expr": "kueue_admitted_active_workloads{cluster_queue=~\"$queue\"}", "legendFormat": "running {{cluster_queue}}" } ] },
+    { "type": "timeseries", "title": "Team quota: nominal vs used vs borrowed (CPU)", "gridPos": {"h":7,"w":12,"x":12,"y":1},
+      "targets": [
+        { "expr": "kueue_cohort_subtree_quota{resource=\"cpu\"}", "legendFormat": "nominal" },
+        { "expr": "kueue_local_queue_resource_usage{resource=\"cpu\"}", "legendFormat": "used" },
+        { "expr": "kueue_cohort_subtree_resource_reservations{resource=\"cpu\"}", "legendFormat": "borrowed" } ] },
+    { "type": "stat", "title": "Admission wait p90 (why-am-I-waiting, seconds)", "gridPos": {"h":6,"w":8,"x":0,"y":8},
+      "targets": [ { "expr": "histogram_quantile(0.9, sum(rate(kueue_admission_wait_time_seconds_bucket{cluster_queue=~\"$queue\"}[10m])) by (le))" } ] },
+    { "type": "stat", "title": "Preemptions / evictions (10m)", "gridPos": {"h":6,"w":8,"x":8,"y":8},
+      "targets": [ { "expr": "sum(increase(kueue_evicted_workloads_total{cluster_queue=~\"$queue\"}[10m]))" } ] },
+
+    { "type": "row", "title": "Ray user — shared cluster growth", "gridPos": {"h":1,"w":24,"x":0,"y":14} },
+    { "type": "timeseries", "title": "Ray cluster desired vs available workers", "gridPos": {"h":7,"w":12,"x":0,"y":15},
+      "targets": [
+        { "expr": "kuberay_cluster_desired_worker_replicas", "legendFormat": "desired {{name}}" },
+        { "expr": "kuberay_cluster_available_worker_replicas", "legendFormat": "available {{name}}" } ] },
+    { "type": "table", "title": "Growth blocked by quota (pending pod workloads)", "gridPos": {"h":7,"w":12,"x":12,"y":15},
+      "targets": [ { "expr": "kueue_pending_workloads{cluster_queue=~\"$queue\"}" } ] },
+
+    { "type": "row", "title": "Serving team — capacity vs batch", "gridPos": {"h":1,"w":24,"x":0,"y":22} },
+    { "type": "timeseries", "title": "Serving admissions and batch displacements", "gridPos": {"h":7,"w":24,"x":0,"y":23},
+      "targets": [
+        { "expr": "sum(increase(kueue_admitted_workloads_total{cluster_queue=~\"$queue\"}[10m]))", "legendFormat": "admitted" },
+        { "expr": "sum(increase(kueue_evicted_workloads_total{reason=\"Preempted\"}[10m]))", "legendFormat": "batch displaced by serving" } ] }
+  ],
+  "templating": { "list": [ { "name": "queue", "type": "query", "query": "label_values(kueue_pending_workloads, cluster_queue)", "includeAll": true } ] }
+}

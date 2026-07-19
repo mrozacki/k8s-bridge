@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>k8s-bridge demo console</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>k8s-bridge demo console <span class="dim">— one screen, type in the terminal</span></h1>
+    <span id="status-pill">connecting…</span>
+  </header>
+
+  <main>
+    <section id="cheatsheet-col">
+      <div id="cheatsheet-header">
+        <h2>Demo script</h2>
+        <p>Click a command to copy it, then paste into the terminal pane on
+           the right. Steps mirror <code>experiments/DEMO.md</code>.</p>
+      </div>
+      <div id="cheatsheet"><!-- populated by app.js from cheatsheet.js --></div>
+    </section>
+
+    <section id="right-col">
+      <div id="terminal-wrap">
+        <div id="terminal-header">
+          <span>Terminal (ttyd) — <span id="terminal-url-label"></span></span>
+          <span>type commands directly here</span>
+        </div>
+        <div id="terminal-frame-wrap">
+          <iframe id="terminal-frame" title="demo terminal"></iframe>
+          <div id="terminal-placeholder" style="display:none;">
+            <p>No terminal reachable yet.</p>
+            <p>Start it with <code>./serve.sh</code> from
+               <code>tools/demo-console/</code> — it launches
+               <code>ttyd</code> bound to <code>127.0.0.1</code> and prints
+               the URL. If <code>ttyd</code> isn't installed:
+               <code>brew install ttyd</code>.</p>
+          </div>
+        </div>
+      </div>
+
+      <div id="dashboard-wrap">
+        <div id="dashboard-header">
+          <span>Dashboard: <span id="dashboard-mode-label">loading…</span></span>
+          <span>set <code>GRAFANA_URL</code> env var (or <code>?grafana=</code>) to embed Grafana</span>
+        </div>
+        <div id="dashboard-body"><!-- Grafana iframe or status strip, from app.js --></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="cheatsheet.js"></script>
+<script>
+  // Injected by serve.sh at launch time (see that script's --config-flag
+  // section) so the page knows the real ttyd/status-api ports and any
+  // configured Grafana URL without the user having to type query params.
+  // serve.sh writes this exact object literal into config.js; if that file
+  // is missing (e.g. opened index.html directly without serve.sh), we fall
+  // back to the same-origin guesses baked into app.js.
+</script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

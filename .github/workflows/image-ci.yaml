@@ -1,0 +1,53 @@
+name: image-ci
+
+# D3 (production-readiness backlog): before this workflow existed, neither
+# Dockerfile was built by any automation — ci.yaml builds/tests the Go module
+# directly on the runner and never invokes docker, so a Dockerfile regression
+# (bad COPY path, broken build stage, missing binary in the final image)
+# shipped completely undetected. This builds both images on every PR/push
+# that touches the prototype module or its Dockerfiles. No push: this is a
+# build-only smoke check, not a publish step (publishing happens in
+# release.yaml, on tag push).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "prototype/**"
+      - ".github/workflows/image-ci.yaml"
+  pull_request:
+    paths:
+      - "prototype/**"
+      - ".github/workflows/image-ci.yaml"
+
+# Least privilege, matching ci.yaml's stance: a local, unpushed docker build
+# needs no write access to the repo or packages.
+permissions:
+  contents: read
+
+concurrency:
+  group: image-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: docker build (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            image: k8s-bridge
+          - dockerfile: Dockerfile.ray-bridge
+            image: ray-bridge
+    steps:
+      # SEC3 (SHA-pin GitHub Actions, matches ci.yaml): actions pinned to full
+      # commit SHAs, kept current by Dependabot, which preserves the trailing
+      # human-readable version comment on each bump.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Plain `docker build`, no push: ubuntu-latest runners ship Docker
+      # preinstalled, so no extra setup action (and no extra SHA pin) is
+      # needed for a build-only check.
+      - name: docker build (${{ matrix.image }}, no push)
+        working-directory: .
+        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }}:ci-check .

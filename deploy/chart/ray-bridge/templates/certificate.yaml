@@ -1,0 +1,38 @@
+{{- /*
+Self-signed cert-manager Issuer + Certificate providing the webhook server's
+serving cert. Gated separately from webhook.enabled (webhook.certManager.enabled,
+default true whenever webhook.enabled=true) so an operator without
+cert-manager installed can still enable the webhook and supply their own
+Secret named per ray-bridge.webhookCertSecretName instead.
+
+A self-signed Issuer (not ClusterIssuer) is namespace-scoped, matching this
+chart's otherwise fully namespace-parameterized posture — no cluster-scoped
+cert-manager object is required.
+*/}}
+{{- if and .Values.webhook.enabled .Values.webhook.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "ray-bridge.webhookIssuerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ray-bridge.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "ray-bridge.webhookCertificateName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ray-bridge.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "ray-bridge.webhookCertSecretName" . }}
+  dnsNames:
+    - {{ include "ray-bridge.webhookServiceName" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "ray-bridge.webhookServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "ray-bridge.webhookIssuerName" . }}
+{{- end }}

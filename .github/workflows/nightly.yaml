@@ -1,0 +1,84 @@
+name: nightly
+
+# Nightly-only checks (backlog AUD5): longer-running than the per-PR ci.yaml
+# pipeline, so they run on a schedule instead of blocking every push/PR.
+on:
+  schedule:
+    # 03:17 UTC daily — off the top of the hour to avoid GitHub Actions'
+    # documented scheduling pile-up at :00.
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+# Least privilege, matching ci.yaml's stance: nothing here needs write
+# access to the repo or packages.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: .
+
+jobs:
+  fuzz:
+    name: fuzz (30s/target)
+    runs-on: ubuntu-latest
+    steps:
+      # SEC3 (SHA-pin GitHub Actions, matches ci.yaml): actions pinned to full
+      # commit SHAs, kept current by Dependabot, which preserves the trailing
+      # human-readable version comment on each bump.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # `make fuzz` runs FuzzGPUsPerNode + FuzzJobEnvelopeDecode
+      # (internal/slurm/fuzz_test.go) and FuzzConfigLoad
+      # (internal/config/fuzz_test.go) for FUZZTIME each (default 30s).
+      # A panic in any target fails this job; go test's fuzz cache also
+      # persists any crasher it finds as a new seed file under testdata/,
+      # which would show up as an untracked file in a subsequent local run.
+      - name: fuzz targets
+        run: make fuzz
+
+  e2e-kind:
+    name: kind e2e (reduced scope — see test/e2e/run.sh header)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # Runners ship kind's dependencies (Docker); we still install OUR pinned
+      # kind version rather than trusting whatever the image happens to ship
+      # (newer ubuntu-latest images preinstall kind, unpinned). Download to a
+      # temp path and `sudo install` into place: the preinstalled binary at
+      # /usr/local/bin/kind is root-owned, so a bare `chmod +x` there fails
+      # with "Operation not permitted" (this broke the nightly starting
+      # 2026-07-10, when the runner image began shipping kind).
+      - name: install kind
+        env:
+          KIND_VERSION: v0.32.0
+          # D6 (production-readiness backlog): checksum pin, not just a bare
+          # download. Source: the release's own kind-linux-amd64.sha256sum
+          # asset —
+          # https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-linux-amd64.sha256sum
+          # (fetched and verified while adding this check; re-verify by hand
+          # against that URL whenever KIND_VERSION bumps).
+          KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+        run: |
+          set -euo pipefail
+          # -f: fail on a non-2xx response instead of writing the error body
+          # (e.g. an HTML error page) to disk as if it were the binary.
+          # --retry 3: ride out a transient network blip against kind's CDN.
+          curl -f --retry 3 -Lo "${RUNNER_TEMP}/kind" "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          kind version
+      # SCOPE: reduced, not the full Slurm+Kueue+JobSet DEMO.md story — the
+      # script header (test/e2e/run.sh) explains why the Slinky slurm-operator
+      # chart is not run here. This asserts the chart-equivalent Deployment
+      # becomes Ready, /metrics serves, and /readyz returns 200 against an
+      # in-cluster mock slurmrestd (JobSet + Kueue ARE installed, real CRDs).
+      - name: run reduced-scope e2e
+        run: ./test/e2e/run.sh

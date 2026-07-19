@@ -1,0 +1,63 @@
+# Kueue Topology-Aware Scheduling setup for the SIMULATED topology:
+# two blocks x two racks, expressed as plain node labels (no real network
+# hierarchy on the playground — the labels ARE the topology as far as Kueue
+# is concerned, which is exactly why simulation works).
+#
+#   block-a: rack-1 (node1), rack-2 (node2)
+#   block-b: rack-1 (node3), rack-2 (node4)
+#
+# Topology CR: ordered levels, top to bottom. hostname is always the leaf.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: Topology
+metadata:
+  name: simulated-dc
+spec:
+  levels:
+    - nodeLabel: "example.com/block"
+    - nodeLabel: "example.com/rack"
+    - nodeLabel: "kubernetes.io/hostname"
+---
+# A TAS-enabled flavor: only nodes carrying the opt-in label participate,
+# and the flavor is bound to the Topology above.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: tas-spot
+spec:
+  nodeLabels:
+    example.com/topology-managed: "true"
+  topologyName: simulated-dc
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: topo-queue
+spec:
+  namespaceSelector: {}
+  preemption:
+    withinClusterQueue: LowerPriority
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: tas-spot
+          resources:
+            - name: cpu
+              nominalQuota: 12
+            - name: memory
+              nominalQuota: 48Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: topo
+  namespace: default
+spec:
+  clusterQueue: topo-queue
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: topo
+  namespace: slurm-jobs
+spec:
+  clusterQueue: topo-queue

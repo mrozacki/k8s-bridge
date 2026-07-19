@@ -1,0 +1,18 @@
+# Code owners are requested for review automatically on matching PRs.
+# Replace the placeholder team/handles before publication (GitHub handles only,
+# no personal email). See MAINTAINERS.md.
+
+# Default owner for everything.
+*                       @mrozacki
+
+# Controller source.
+/cmd/                   @mrozacki
+/internal/              @mrozacki
+/api/                   @mrozacki
+
+# Deployment assets (chart, CRD) — security-sensitive.
+/deploy/                @mrozacki
+
+# Security policy and threat model changes need maintainer review.
+/SECURITY.md            @mrozacki
+/docs/reference/threat-model.md  @mrozacki
