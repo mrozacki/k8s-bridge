@@ -130,8 +130,8 @@
 # Location rationale: same as run.sh — needs the Go module to build the
 # bridge image and reaches up to deploy/chart for the real chart install.
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.." # -> .
-REPO_ROOT="$(cd ../.. && pwd)"
+cd "$(dirname "${BASH_SOURCE[0]}")/../.." # -> repo root
+REPO_ROOT="$(pwd)"
 CHART_DIR="${REPO_ROOT}/deploy/chart/k8s-bridge"
 SLURM_ASSETS_DIR="$(pwd)/test/e2e/slurm"
 
