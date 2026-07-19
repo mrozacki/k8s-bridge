@@ -9,7 +9,7 @@ name: release
 #
 # REGISTRY LOCATION IS A PLACEHOLDER DECISION for the engineering team:
 # images go to ghcr.io/${{ github.repository }}/{k8s-bridge,ray-bridge} and
-# charts to oci://ghcr.io/${{ github.repository_owner }}/charts because GHCR
+# charts to oci://ghcr.io/${{ github.repository }}/charts because GHCR
 # is available to this repo with zero extra setup (just GITHUB_TOKEN). A
 # production rollout may prefer a dedicated registry (e.g. a cloud provider's
 # Artifact Registry, or a shared CNCF-hosted one) — revisit before GA.
@@ -119,11 +119,11 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/charts"
           helm package deploy/chart/k8s-bridge -d "${RUNNER_TEMP}/charts"
           helm package deploy/chart/ray-bridge -d "${RUNNER_TEMP}/charts"
-      - name: helm push (oci://ghcr.io/${{ github.repository_owner }}/charts)
+      - name: helm push (oci://ghcr.io/${{ github.repository }}/charts)
         run: |
           set -euo pipefail
           for pkg in "${RUNNER_TEMP}"/charts/*.tgz; do
-            helm push "$pkg" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+            helm push "$pkg" "oci://ghcr.io/${{ github.repository }}/charts"
           done
 
   github-release:
