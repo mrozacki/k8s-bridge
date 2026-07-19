@@ -2,7 +2,7 @@ name: chart-ci
 
 # D1 (production-readiness backlog): before this workflow existed, a PR that
 # touches ONLY deploy/** (chart templates, values, CRDs) ran NO checks except
-# the DCO gate — ci.yaml's trigger is scoped to prototype/**, so a broken
+# the DCO gate — ci.yaml's trigger is scoped to the Go source, so a broken
 # chart (bad template, invalid values, malformed schema) could merge
 # undetected. This closes that gap for both charts (k8s-bridge, ray-bridge):
 # `helm lint --strict`, a `helm template` render check with default values
