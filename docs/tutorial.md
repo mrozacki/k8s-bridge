@@ -77,7 +77,7 @@ cluster; everything shares the same pool of nodes.
 
 ```bash
 cd experiments/01-gke-playground
-NUM_NODES=3 MAX_NODES=3 ./scripts/01-create-cluster.sh
+MIN_NODES=3 NUM_NODES=3 MAX_NODES=3 ./scripts/01-create-cluster.sh
 ./scripts/02-install-components.sh     # cert-manager, JobSet, Kueue, KubeRay, Slurm (+ lua plugin)
 ./scripts/03-configure-queues.sh
 kubectl apply -f ../05-topology/manifests/topology-tas.yaml
@@ -93,6 +93,11 @@ for i in 0 1 2; do N=$(kubectl get nodes -o name | sed -n "$((i+1))p" | cut -d/ 
 **Expected result:** 3 nodes `Ready`, Kueue/JobSet/KubeRay/Slurm pods
 `Running` in their namespaces, and the `workloadmixings.k8s-bridge.x-k8s.io`
 CRD installed (`kubectl get crd | grep workloadmixing`).
+
+`MIN_NODES=3` matters: the cluster uses the `optimize-utilization`
+autoscaling profile, which aggressively removes idle nodes — without a
+floor of 3, the autoscaler can shrink the pool before you label it, and
+the topology sections later assume all three labeled nodes exist.
 
 **What just happened:** the install script laid down the whole shared
 substrate — Kueue as the admission authority, JobSet as the grouped-pod API

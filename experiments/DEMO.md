@@ -68,7 +68,7 @@ pool of nodes; there is no separate Slurm cluster."
 
 ```bash
 cd experiments/01-gke-playground
-NUM_NODES=3 MAX_NODES=3 ./scripts/01-create-cluster.sh
+MIN_NODES=3 NUM_NODES=3 MAX_NODES=3 ./scripts/01-create-cluster.sh
 ./scripts/02-install-components.sh     # cert-manager, JobSet, Kueue, KubeRay, Slurm (+ lua plugin)
 ./scripts/03-configure-queues.sh
 kubectl apply -f ../05-topology/manifests/topology-tas.yaml

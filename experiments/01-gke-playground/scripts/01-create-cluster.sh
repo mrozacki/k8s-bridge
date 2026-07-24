@@ -10,7 +10,7 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --machine-type "${MACHINE_TYPE}" \
   --spot \
   --num-nodes "${NUM_NODES}" \
-  --enable-autoscaling --min-nodes 1 --max-nodes "${MAX_NODES}" \
+  --enable-autoscaling --min-nodes "${MIN_NODES:-1}" --max-nodes "${MAX_NODES}" \
   --disk-size 50 \
   --release-channel regular \
   --workload-pool "${PROJECT_ID}.svc.id.goog" \
