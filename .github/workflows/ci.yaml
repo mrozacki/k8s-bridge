@@ -4,6 +4,10 @@ name: ci
 # of a generated CRD copy that touches nothing under the Go source still triggers
 # the manifests-drift job below and gets rejected.
 on:
+  # Manual trigger: path-filtered push workflows silently skip when GitHub
+  # cannot compute the changed-file set (e.g. after a history rewrite) —
+  # this is the escape hatch to validate main regardless.
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
