@@ -847,6 +847,48 @@ func testBridgeCountingWarns(t *testing.T, fs *fakeSlurm, objs ...client.Object)
 	return b, kube, &count
 }
 
+// TestCleanupFailsSlurmJobForCompletedJobSet is the TC-D3-retest twin of
+// the D1 regression below: slurmd exits 0 on a graceful pod delete, so the
+// child Job counts it as success and the JobSet reports Completed=True —
+// no pod is ever recreated, and the requeued (non-terminal) Slurm job
+// would wait forever for a dynamic node that cannot come back. A
+// Completed JobSet with a non-terminal Slurm job must take the same
+// fail-and-clean path as a Failed one.
+func TestCleanupFailsSlurmJobForCompletedJobSet(t *testing.T) {
+	fs := &fakeSlurm{jobs: []slurm.Job{
+		{JobID: 51, JobState: []string{"PENDING"}, Hold: false, StateReason: "ReqNodeNotAvail"},
+	}}
+	js := ownedJobSet(t, 51)
+	js.Status.Conditions = []metav1.Condition{{
+		Type:               string(jobsetv1alpha2.JobSetCompleted),
+		Status:             metav1.ConditionTrue,
+		Reason:             "AllJobsCompleted",
+		LastTransitionTime: metav1.Now(),
+	}}
+	b, kube, warnCount := testBridgeCountingWarns(t, fs, js)
+
+	failedBefore := testutil.ToFloat64(metrics.JobsFailedTotal)
+	if err := b.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+
+	if got := fs.comments[51]; got == "" {
+		t.Error("comment must explain the JobSet-terminal failure")
+	}
+	if len(fs.cancelled) != 1 || fs.cancelled[0] != 51 {
+		t.Errorf("cancelled = %v, want [51]", fs.cancelled)
+	}
+	if _, found := getJobSet(t, kube, "slurm-job-51"); found {
+		t.Error("JobSet should be cleaned up after its Slurm job was failed")
+	}
+	if got := testutil.ToFloat64(metrics.JobsFailedTotal); got != failedBefore+1 {
+		t.Errorf("JobsFailedTotal = %v, want %v", got, failedBefore+1)
+	}
+	if *warnCount != 1 {
+		t.Errorf("Warn log lines = %d, want exactly 1", *warnCount)
+	}
+}
+
 // TestCleanupFailsSlurmJobForFailedJobSet is the D1 regression: a JobSet
 // whose Slurm job never became terminal but which itself reports Failed=True
 // must have its Slurm job actively failed (comment + cancel), be cleaned up

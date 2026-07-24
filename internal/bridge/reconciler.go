@@ -759,6 +759,18 @@ func jobSetFailed(js *jobsetv1alpha2.JobSet) bool {
 	return apimeta.IsStatusConditionTrue(js.Status.Conditions, string(jobsetv1alpha2.JobSetFailed))
 }
 
+// jobSetCompleted reports whether js carries a Completed=True condition.
+// Live finding (TC-D3 retest): slurmd exits 0 on a graceful pod delete, so
+// the child Job counts it as a SUCCESS, the JobSet goes Completed, and no
+// pod is ever recreated — while slurmctld has requeued the Slurm job to
+// wait for a dynamic node that will never come back. slurmd pods never
+// exit on their own in the normal flow (the bridge deletes the JobSet
+// after the Slurm job turns terminal), so Completed + a non-terminal
+// Slurm job is always this stranded state, never a healthy race.
+func jobSetCompleted(js *jobsetv1alpha2.JobSet) bool {
+	return apimeta.IsStatusConditionTrue(js.Status.Conditions, string(jobsetv1alpha2.JobSetCompleted))
+}
+
 // failJobForDeadJobSet implements D1: a JobSet that died (Failed condition)
 // before its Slurm job could run must not leave that job pending forever.
 // It writes an explanatory Slurm comment, cancels the job via slurmrestd,
@@ -779,6 +791,10 @@ func (b *Bridge) failJobForDeadJobSet(ctx context.Context, job *slurm.Job, js *j
 	reason := "unknown"
 	if cond := apimeta.FindStatusCondition(js.Status.Conditions, string(jobsetv1alpha2.JobSetFailed)); cond != nil && cond.Message != "" {
 		reason = cond.Message
+	} else if cond := apimeta.FindStatusCondition(js.Status.Conditions, string(jobsetv1alpha2.JobSetCompleted)); cond != nil {
+		// TC-D3 retest: the JobSet "succeeded" because slurmd exited 0 on a
+		// pod delete — from the Slurm job's perspective its capacity is gone.
+		reason = "JobSet completed (slurmd pods exited) while the Slurm job was still non-terminal"
 	}
 	comment := fmt.Sprintf("wm: JobSet failed: %s", reason)
 	if err := b.slurm.SetJobComment(ctx, job.JobID, comment); err != nil {
@@ -792,7 +808,7 @@ func (b *Bridge) failJobForDeadJobSet(ctx context.Context, job *slurm.Job, js *j
 	// Exactly one Warn-level line for this event, regardless of whether the
 	// comment write or cancel call above also hit an error (those are logged
 	// at Debug so this stays the single user-facing signal per spec).
-	b.log.Warn("failing slurm job: its JobSet reported Failed", "slurmJobID", job.JobID, "jobset", js.Name, "reason", reason, "cancelled", cancelErr == nil)
+	b.log.Warn("failing slurm job: its JobSet turned terminal before the job did", "slurmJobID", job.JobID, "jobset", js.Name, "reason", reason, "cancelled", cancelErr == nil)
 	b.eventf(js, corev1.EventTypeWarning, "JobSetFailed",
 		"Slurm job %d failed: JobSet reported Failed (%s)", job.JobID, reason)
 	return cancelErr == nil
@@ -883,11 +899,15 @@ func (b *Bridge) cleanupFinishedJobs(ctx context.Context, cfg *config.Config, sn
 		// activeDeadlineSeconds fired before the Slurm job's dynamic nodes
 		// registered - a live defect) previously fell into the
 		// "leave it alone" branch below forever, since the Slurm job itself
-		// never transitions out of pending on its own. Detect Failed here and
-		// fail the Slurm job before falling through to the same cleanup path
-		// used for completed jobs. A Completed JobSet, or one with no Failed
-		// condition, must NOT take this branch.
-		if found && !job.IsTerminal() && jobSetFailed(js) {
+		// never transitions out of pending on its own. The TC-D3 retest
+		// added the Completed twin: slurmd exits 0 on a graceful pod
+		// delete, the child Job counts that as success, the JobSet goes
+		// Completed and never recreates the pod — stranding the requeued
+		// Slurm job on a node that cannot return. Both terminal shapes get
+		// the same treatment: fail the Slurm job, then fall through to the
+		// cleanup path used for completed jobs. A live (non-terminal)
+		// JobSet must NOT take this branch.
+		if found && !job.IsTerminal() && (jobSetFailed(js) || jobSetCompleted(js)) {
 			if !b.failJobForDeadJobSet(ctx, job, js) {
 				// CancelJob itself failed (e.g. slurmrestd unreachable): do
 				// NOT fall through to deleting the JobSet. The JobSet is the
