@@ -84,6 +84,18 @@ func TestToJobSetMapsCoreFields(t *testing.T) {
 	if !found {
 		t.Errorf("args %v missing %q", container.Args, wantArg)
 	}
+	// TC-D3 regression: without -b a recreated slurmd pod re-registers
+	// under a node name slurmctld still considers busy, leaving the old
+	// job as a ghost.
+	bootFlag := false
+	for _, a := range container.Args {
+		if a == "-b" {
+			bootFlag = true
+		}
+	}
+	if !bootFlag {
+		t.Errorf("args %v missing \"-b\" (boot report; TC-D3 ghost-job guard)", container.Args)
+	}
 	if container.SecurityContext == nil || container.SecurityContext.Privileged == nil || !*container.SecurityContext.Privileged {
 		t.Error("slurmd container must be privileged (cgroup access)")
 	}

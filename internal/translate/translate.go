@@ -144,6 +144,12 @@ func ToJobSet(job *slurm.Job, cfg *config.Config) (*jobsetv1alpha2.JobSet, error
 				// multiple tasks onto one pod. Keyword is plural "Features".
 				"--conf", slurmdConf(job),
 				"--conf-server", cfg.Slurmd.ConfServer,
+				// Live finding (TC-D3): when the JobSet recreates a slurmd
+				// pod under the same node name, slurmctld still believes the
+				// old job occupies it and the job hangs as a ghost. -b makes
+				// slurmd report a node boot on startup, so slurmctld requeues
+				// or fails the job instead of leaving it pinned to a dead pod.
+				"-b",
 			},
 			// Ready only once slurmd listens on its node port — a close
 			// proxy for "registered with slurmctld", giving Kueue's
