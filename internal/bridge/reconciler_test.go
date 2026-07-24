@@ -539,6 +539,45 @@ func TestTickWaitsForNodeRegistration(t *testing.T) {
 	}
 }
 
+// TestTickWarnsOnNonRegistrationUpdateFailure is the live regression from
+// the tutorial validation run: a job-update failure that is NOT the
+// "Invalid feature specification" registration signal (here: the "Invalid
+// user id" a misconfigured slurmUser produces) stranded the job held
+// forever with only a Debug log. Such a failure must still not release the
+// job, but must surface at Warn; the true registration signal must stay
+// quiet (Debug only).
+func TestTickWarnsOnNonRegistrationUpdateFailure(t *testing.T) {
+	fs := &fakeSlurm{
+		jobs:       []slurm.Job{heldJob(11, "mixing")},
+		featureErr: errors.New("422 Unprocessable Entity: Invalid user id"),
+	}
+	b, _, warnCount := testBridgeCountingWarns(t, fs, admittedWorkload("slurm-job-11"))
+	if err := b.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(fs.released) != 0 {
+		t.Fatalf("job released despite failed constraint update: %v", fs.released)
+	}
+	if *warnCount != 1 {
+		t.Errorf("Warn log lines = %d, want exactly 1 for a non-registration failure", *warnCount)
+	}
+
+	fs2 := &fakeSlurm{
+		jobs:       []slurm.Job{heldJob(12, "mixing")},
+		featureErr: errors.New("422 Unprocessable Entity: Invalid feature specification"),
+	}
+	b2, _, warnCount2 := testBridgeCountingWarns(t, fs2, admittedWorkload("slurm-job-12"))
+	if err := b2.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(fs2.released) != 0 {
+		t.Fatalf("job released before nodes registered: %v", fs2.released)
+	}
+	if *warnCount2 != 0 {
+		t.Errorf("Warn log lines = %d, want 0 for the expected registration-wait path", *warnCount2)
+	}
+}
+
 func TestTickIsIdempotent(t *testing.T) {
 	fs := &fakeSlurm{jobs: []slurm.Job{heldJob(9, "mixing")}}
 	b, _ := testBridge(t, fs, admittedWorkload("slurm-job-9"))
@@ -786,6 +825,17 @@ func (h warnCountingHandler) Handle(ctx context.Context, r slog.Record) error {
 		*h.count++
 	}
 	return h.Handler.Handle(ctx, r)
+}
+
+// WithAttrs/WithGroup must re-wrap: the embedded handler's versions return
+// the INNER handler type, silently dropping the counter for any logger
+// derived via log.With(...) — which is how tick's per-job logger is built.
+func (h warnCountingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return warnCountingHandler{Handler: h.Handler.WithAttrs(attrs), count: h.count}
+}
+
+func (h warnCountingHandler) WithGroup(name string) slog.Handler {
+	return warnCountingHandler{Handler: h.Handler.WithGroup(name), count: h.count}
 }
 
 func testBridgeCountingWarns(t *testing.T, fs *fakeSlurm, objs ...client.Object) (*Bridge, client.Client, *int) {

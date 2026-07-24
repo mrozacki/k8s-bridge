@@ -593,9 +593,18 @@ func (b *Bridge) admitHeldJobs(ctx context.Context, cfg *config.Config, held []s
 		// and release continue to happen ONLY after Kueue admission, never
 		// before — that ordering guarantee is unchanged by the merge.
 		if err := b.slurm.SetJobFeatures(ctx, job.JobID, translate.NodeFeature(job.JobID)); err != nil {
-			// Demoted to Debug (audit AUD2): repeats every tick per unadmitted
-			// job, so at Info it drowns out genuine signal under any backlog.
-			log.Debug("dynamic nodes not registered yet, will retry", "reason", err)
+			// Live finding (TC-B retest): only "Invalid feature
+			// specification" means nodes-not-registered-yet. Anything else
+			// (e.g. "Invalid user id" from a misconfigured slurmUser) is a
+			// real fault that would otherwise strand the job held forever
+			// with no visible signal — surface it at Warn.
+			if strings.Contains(err.Error(), "Invalid feature specification") {
+				// Demoted to Debug (audit AUD2): repeats every tick per unadmitted
+				// job, so at Info it drowns out genuine signal under any backlog.
+				log.Debug("dynamic nodes not registered yet, will retry", "reason", err)
+			} else {
+				log.Warn("job update failed for a reason other than pending node registration, will retry", "reason", err)
+			}
 			continue
 		}
 		if err := b.slurm.ReleaseJob(ctx, job.JobID); err != nil {

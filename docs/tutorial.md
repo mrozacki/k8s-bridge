@@ -188,7 +188,6 @@ spec:
   # opt-in (the CRD's CEL rule rejects http:// otherwise). In-cluster, use https.
   slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
   allowInsecureHTTP: true
-  slurmUser: "k8s-bridge" # dedicated low-privilege Slurm REST user, not root
   slurmTokenFile: "/tmp/wm-slurm-token"
   localQueue: "team-a"
   pollInterval: "10s"
@@ -210,8 +209,13 @@ spec:
 
 Reading it top to bottom, by concern:
 
-- **Talking to Slurm.** `slurmRestURL`, `slurmUser`, and `slurmTokenFile`
-  tell the bridge where `slurmrestd` lives and how to authenticate to it.
+- **Talking to Slurm.** `slurmRestURL` and `slurmTokenFile` tell the bridge
+  where `slurmrestd` lives and how to authenticate to it. The optional
+  `slurmUser` field is left unset on purpose: empty means slurmrestd acts
+  as the user the JWT was minted for. Only set it to a user that actually
+  exists in your Slurm cluster — a non-existent user makes every job
+  update fail with "Invalid user id", and the bridge can then never
+  release held jobs.
   `allowInsecureHTTP` is a deliberate, explicit opt-in for plaintext
   `http://` endpoints (useful for a local playground; production should use
   `https://`, and the CRD rejects `http://` otherwise via a validation
