@@ -16,9 +16,8 @@ instead of making Slurm the cluster scheduler, it makes Kueue the master and
 translates other workloads into Kueue-admitted capacity.
 
 > **Status: experimental prototype.** This repository contains a working
-> prototype, its design records, and reproducible experiments. It is
-> live-validated (see below) but is not production-ready. Interfaces, layout,
-> and scope may change.
+> prototype, its design records, and reproducible experiments. It is not
+> production-ready. Interfaces, layout, and scope may change.
 
 ## The problem
 
@@ -54,8 +53,7 @@ Two controllers apply this pattern:
   `RayCluster` (`RayJob`s targeting it via `clusterSelector`), stands up a
   Kueue-admitted JobSet of dedicated Ray workers advertising a per-job custom
   resource, and gates the job on that resource so it cannot run until Kueue
-  admits the workers (the *pin-gate* model,
-  [ADR-0013](docs/adr/0013-ray-pin-gate-admission.md)).
+  admits the workers (the *pin-gate* model).
 
 Both are built on controller-runtime and share a common admission library, so a
 Slurm JobSet and a Ray worker JobSet are just two Kueue workloads competing in
@@ -65,25 +63,11 @@ the same ClusterQueue.
 
 | Workload | How it participates | Status |
 |----------|---------------------|--------|
-| Slurm batch jobs | Translated to JobSets by `k8s-bridge` | Implemented, live-validated |
-| Ray inner workloads (jobs in a shared `RayCluster`) | Dedicated Kueue-admitted workers per job, gated by a Ray custom resource (`ray-bridge`) | Implemented, live-validated ([ADR-0013](docs/adr/0013-ray-pin-gate-admission.md)) |
+| Slurm batch jobs | Translated to JobSets by `k8s-bridge` | Prototype |
+| Ray inner workloads (jobs in a shared `RayCluster`) | Dedicated Kueue-admitted workers per job, gated by a Ray custom resource (`ray-bridge`) | Prototype |
 | Kubernetes batch (Job/JobSet) | Admitted by Kueue directly | Native |
-| Standalone `RayJob` (own cluster) | Already Kueue-integrated natively; no bridge needed | Native / out of scope |
-| Serving / inference | Two-tier: Kueue admits capacity at high priority; autoscalers own replica counts | Design ([ADR-0007](docs/adr/0007-two-tier-serving-admission.md)) |
-
-## What's been validated
-
-Live, on `kind` and small GKE clusters (torn down after each run):
-
-- **Slurm:** the full discover → translate → admit → dynamic-node → release →
-  cleanup cycle, and 520 concurrent held-job → JobSet translations with zero
-  tick errors.
-- **Ray:** worker join, per-job resource pinning, run-to-completion, and Kueue
-  **preemption by priority** — including *cross-type* preemption (a high-priority
-  Ray workload preempting a plain Kubernetes batch JobSet in one ClusterQueue)
-  and **topology-aware co-location** (TAS).
-
-See [`docs/VALIDATION.md`](docs/VALIDATION.md) for the per-run findings.
+| Standalone `RayJob` (own cluster) | Already Kueue-integrated; no bridge needed | Native |
+| Serving / inference | Kueue admits capacity at high priority; autoscalers own replica counts | Native |
 
 ## Getting started
 
@@ -97,11 +81,10 @@ go build ./...         # both binaries: cmd/k8s-bridge and cmd/ray-bridge
 
 Try it on a cluster:
 
-- **Ray on `kind` (free):** [`experiments/10-ray-bridge/README.md`](experiments/10-ray-bridge/README.md) —
-  a reproducible runbook that stands up KubeRay + Kueue + JobSet, runs the bridge,
-  and submits an inner workload.
-- **Full feature tour:** [`experiments/DEMO.md`](experiments/DEMO.md) — a narrated
-  runbook exercising Slurm + Kubernetes + Ray + inference on one pool.
+- **Tutorial:** [`docs/tutorial.md`](docs/tutorial.md) — a guided, hands-on
+  walk-through of experimenting with the bridge: Slurm + Kubernetes + Ray +
+  inference on one pool, including the `WorkloadMixing` custom resource that
+  configures it.
 - **Deploy:** Helm charts under [`deploy/chart/`](deploy/chart/) for both bridges;
   see [`docs/installation.md`](docs/installation.md) for a consolidated,
   production-oriented install guide covering the full stack.
@@ -121,8 +104,9 @@ Try it on a cluster:
 | `cmd/`, `internal/`, `api/` | The Go controllers (`cmd/k8s-bridge`, `cmd/ray-bridge`) and their internal packages |
 | `deploy/` | Helm charts, the `WorkloadMixing` CRD, and monitoring manifests |
 | `docs/reference/` | Supporting reference documents (threat model) |
-| `docs/adr/` | Architecture Decision Records |
 | `docs/architecture.md` | System and code architecture |
+| `docs/custom-resource.md` | The `WorkloadMixing` custom resource: design and field reference |
+| `docs/tutorial.md` | Hands-on tutorial for experimenting with the bridge |
 | `docs/controller.md` | Controller reference: flags, config surface, deployment shapes |
 | `docs/installation.md` | Consolidated production installation guide (full stack) |
 | `docs/upgrade-guide.md` | Upgrading an existing install: CRDs, rollout strategy, compatibility policy |
@@ -136,12 +120,9 @@ Try it on a cluster:
 ## Design and decisions
 
 The authoritative design starts with
-[`docs/architecture.md`](docs/architecture.md);
-significant decisions are recorded as ADRs in [`docs/adr/`](docs/adr/).
-A good entry point for the *why* is
-[ADR-0006](docs/adr/0006-ray-inner-workload-admission.md) (Ray admission
-granularity) and [ADR-0013](docs/adr/0013-ray-pin-gate-admission.md) (the
-pin-gate mechanism).
+[`docs/architecture.md`](docs/architecture.md). The `WorkloadMixing` custom
+resource — the bridge's configuration surface — is documented in
+[`docs/custom-resource.md`](docs/custom-resource.md).
 
 ## Related projects
 
@@ -150,13 +131,6 @@ pin-gate mechanism).
 - [KubeRay](https://github.com/ray-project/kuberay) — Ray on Kubernetes (`RayCluster`, `RayJob`)
 - [Slinky / slurm-operator](https://github.com/SlinkyProject/slurm-operator) — Slurm on Kubernetes
 - [Slurm](https://slurm.schedmd.com/) — the HPC workload manager
-
-## Contributing
-
-Contributions are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Commits must be signed off
-([DCO](https://developercertificate.org/)). Security issues: see
-[`SECURITY.md`](SECURITY.md).
 
 ## License
 
