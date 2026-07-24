@@ -13,6 +13,9 @@ Setup: `manifests/cohort-queues.yaml` — team-a and team-b each nominally own
 6 CPU, sharing cohort `research`; team-b sets `lendingLimit: 2` so it always
 keeps a 4-CPU floor (the pattern ADR-0006/0007 prescribe for shared
 base capacity). Both queues use the TAS flavor from experiment 05.
+The borrowing workload lives in `manifests/teamb-filler-job.yaml` (a
+separate file because its `generateName` requires `kubectl create`, while
+the queue objects are `kubectl apply`-able declarative config).
 
 ## Headline results
 

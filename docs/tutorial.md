@@ -458,7 +458,7 @@ automatically, and reclaimed the moment the owning team actually needs
 it — and this composes with topology-aware scheduling too.
 
 ```bash
-kubectl create -f ../experiments/06-multitenant/manifests/cohort-queues.yaml  # filler Job section
+kubectl create -f ../experiments/06-multitenant/manifests/teamb-filler-job.yaml
 kubectl get clusterqueue team-b -o jsonpath='{.status.flavorsUsage[0].resources[0]}'  # borrowed>0
 sbatch --partition=mixing --ntasks=6 --wrap='sleep 120'   # team-a reclaims
 kubectl get events -n default | grep -i "reclamation within the cohort"
