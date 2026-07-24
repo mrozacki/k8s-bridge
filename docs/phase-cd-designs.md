@@ -65,12 +65,4 @@ the head workload from running workloads' durations and admits a smaller
 workload only if it finishes before that projection (classic conservative
 backfill). Sources: Slurm `--time` (bridge sets it — already parsed),
 Ray/K8s via annotation. Positioning: this is the single biggest UX gap vs
-Slurm (finding #4) and a natural Google-led contribution per the OSS
-strategy.
-
-## D4. SchedMD/NVIDIA cooperation posture
-
-Unchanged from the strategy doc (their "Slurm Bridge + Kueue" counter-
-proposal pending evaluation). Technical ammunition from this workspace:
-the validated bridge cycle, the reclaim/fair-sharing story, and the UX
-delta list — bring these to the comparison table.
+Slurm (finding #4) and a natural upstream contribution to Kueue.

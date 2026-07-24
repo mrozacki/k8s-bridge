@@ -4,9 +4,9 @@
   generated manifests; PR 2: typed consumption + `metav1.Condition` status),
   2026-07-12. See "Delivery notes" below for the one deliberate deviation
   from the plan (status.conditions upgraded to `metav1.Condition`).
-- **Context source:** production-readiness review 2026-07-11
-  (`docs/production-readiness-plan.md` §3 phase 1), which ranked the
-  unstructured-API design as the root cause of several recurring costs.
+- **Context source:** production-readiness review 2026-07-11, which ranked
+  the unstructured-API design as the highest-leverage production-readiness
+  gap and root cause of several recurring costs.
 - **Decision owner:** engineering team; this ADR frames the decision and the
   migration plan for ratification.
 

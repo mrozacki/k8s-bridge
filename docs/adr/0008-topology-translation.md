@@ -7,8 +7,8 @@
 
 HPC workloads are latency-sensitive to network topology: a distributed
 training job wants all its nodes under one leaf switch/rack. Slurm users
-express this with `--switches=N` (topology/tree plugin); the design docs
-list topology-aware scheduling as a P1 post-MVP milestone. Kueue provides
+express this with `--switches=N` (topology/tree plugin); topology-aware
+scheduling is a P1 post-MVP milestone. Kueue provides
 Topology-Aware Scheduling (TAS, beta): a cluster-scoped `Topology` CR
 declares hierarchy levels as node label keys, a `ResourceFlavor` binds to
 it, and workloads constrain placement via podset annotations

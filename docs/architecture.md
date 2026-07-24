@@ -371,8 +371,8 @@ localhost-only.
   retries the whole path — deleting it would strand the job with no
   remaining record to retry against.
 - **Resource leak guard**: none yet in the prototype — production needs
-  `activeDeadlineSeconds` derived from the job's time limit (design doc) or
-  an idle-slurmd sidecar.
+  `activeDeadlineSeconds` derived from the job's time limit or an
+  idle-slurmd sidecar.
 - **Bridge crash mid-tick / leader failover**: leader election means a
   standby replica (if run) takes over once the Lease expires; a
   single-replica deploy simply restarts and reconstructs state exactly as

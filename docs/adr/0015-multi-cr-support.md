@@ -6,9 +6,9 @@
   known need (many Slurm clusters, one install) without trading away the H4
   namespaced-RBAC secure default that a cluster-wide watch would force back
   to ClusterRoles.
-- **Context source:** production-readiness review 2026-07-11
-  (`docs/production-readiness-plan.md` §3 phase 1, item "multi-CR support");
-  depends on ADR-0014 (typed API) whose PR 1 is merged and PR 2 in flight.
+- **Context source:** production-readiness review 2026-07-11, which flagged
+  multi-CR support as a phase-1 production-readiness item; depends on
+  ADR-0014 (typed API) whose PR 1 is merged and PR 2 in flight.
 - **Decision owner:** engineering team; this ADR frames the decision for
   ratification.
 

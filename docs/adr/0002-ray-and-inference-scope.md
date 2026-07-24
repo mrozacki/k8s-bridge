@@ -6,7 +6,7 @@
 
 ## Context
 
-The original design documents frame k8s-bridge as mixing Slurm batch jobs with
+k8s-bridge was originally framed as mixing Slurm batch jobs with
 generic Kubernetes workloads under Kueue. Early customer signals indicate that
 users running **Ray on Kubernetes** (via KubeRay) would also find value in a
 single admission point that arbitrates between Slurm, Ray, and other

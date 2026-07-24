@@ -14,7 +14,7 @@ nodes, run exactly one held job, and disappear cleanly?*
 
 If this works manually, phase 3 is "just" automation. If it does not, we have
 saved ourselves from automating a broken idea — and produced precise feedback
-for the design docs.
+for the next design iteration.
 
 ## The choreography (what the controller will automate)
 

@@ -18,8 +18,8 @@ long-lived, shared Ray clusters (KubeRay) need admission at the granularity
 of the **workloads running inside** the cluster — the same way k8s-bridge
 queues individual Slurm jobs, not the Slurm cluster.
 
-Cluster-level admission has exactly the pathology our strategy document
-criticizes in Slurm Bridge's slurmd-in-pod mode: an admitted-but-idle
+Cluster-level admission has exactly the pathology this project rejects
+in Slurm Bridge's slurmd-in-pod mode: an admitted-but-idle
 cluster **hoards quota** for its entire lifetime, and every inner job is
 invisible to the platform's admission authority (no cross-workload
 priorities, no preemption, no fair sharing against Slurm/K8s batch).
@@ -71,7 +71,7 @@ not workloads, is what queues.
   ephemeral per-job clusters (Kueue's native RayJob mode).
 - **Teach Kueue about Ray's internal scheduler** (mirror Ray logical
   resources into quota) — rejected: two sources of truth for the same
-  capacity, the exact "two masters" problem the strategy doc rejects.
+  capacity, exactly the "two masters" pathology this project rejects.
 - **GKE-level solution only (node pools per tenant + PriorityClasses)** —
   simpler but abandons unified quotas/fair-sharing across Slurm/Ray/K8s,
   which is the product's core promise.

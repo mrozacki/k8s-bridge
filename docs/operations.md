@@ -1,6 +1,6 @@
 # Day-2 operations guide
 
-Fills the gap identified in the day-2 audit: the design docs specified
+Fills the gap identified in the day-2 audit: the prototype's design specified
 metrics but no SLOs, alerts, or on-call procedures. Runbooks below encode
 behavior we VALIDATED live, not theory. Metrics, leader election, and
 Kubernetes Events are **shipped and live-validated** (ADR-0011, backlog
