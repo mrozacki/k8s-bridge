@@ -1,12 +1,25 @@
 #!/bin/bash
-set -x
+# set -e (matching the sibling suites) so a failing cleanup step aborts instead
+# of leaving state behind that silently corrupts the later test cases. Steps
+# that are EXPECTED to fail carry an explicit `|| true` below. Deliberately no
+# `pipefail`: nearly every command here pipes into `tee` to capture evidence,
+# and the exit status we care about is tee's.
+#
+# Note the `POD=$(kubectl ... || true)` in the wait loops: a `VAR=$(cmd)`
+# assignment inherits cmd's exit status, and the jsonpath probe legitimately
+# fails ("array index out of bounds") on every iteration before the pod exists
+# — which is exactly what those loops are waiting for.
+set -ex
 
 export PATH="$HOME/bin:$PATH"
 LOGIN_POD=$(kubectl get pods -n slurm -l app.kubernetes.io/component=login -o jsonpath='{.items[0].metadata.name}')
 
 echo "=== TC-B1 ==="
+# Negative test: this WorkloadMixing is intentionally invalid, so the apply is
+# EXPECTED to be rejected and the follow-up get is expected to find nothing.
+# Both are marked `|| true` so `set -e` treats the rejection as the result.
 export EVID="$HOME/k8s-bridge-testrun/TC-B1"; mkdir -p "$EVID"
-cat <<'EOF' | kubectl apply -f - 2>&1 | tee "$EVID/apply.txt"
+cat <<'EOF' | kubectl apply -f - 2>&1 | tee "$EVID/apply.txt" || true
 apiVersion: k8s-bridge.x-k8s.io/v1alpha1
 kind: WorkloadMixing
 metadata:
@@ -16,7 +29,7 @@ spec:
   slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
   allowInsecureHTTP: true
 EOF
-kubectl get workloadmixing wm-invalid-b1 -n slurm-jobs 2>&1 | tee "$EVID/get.txt"
+kubectl get workloadmixing wm-invalid-b1 -n slurm-jobs 2>&1 | tee "$EVID/get.txt" || true
 kubectl delete workloadmixing wm-invalid-b1 -n slurm-jobs --ignore-not-found
 
 echo "=== TC-B2 ==="
@@ -33,7 +46,7 @@ JOBID=$(grep -oE '[0-9]+' "$EVID/submit.txt" | tail -1); echo "JOBID=$JOBID" | t
 for i in $(seq 1 12); do kubectl get jobset -n slurm-jobs -o name | grep -q "$JOBID" && break; sleep 5; done
 kubectl get jobset -n slurm-jobs | tee "$EVID/jobsets.txt"
 echo "Wait for JobSet pods..."
-for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); [ -n "$POD" ] && break; sleep 5; done
+for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true); [ -n "$POD" ] && break; sleep 5; done
 kubectl wait --for=condition=Ready pod -n slurm-jobs --selector="k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" --timeout=180s 2>&1 | tee "$EVID/wait.txt" || true
 kubectl exec -n slurm "$LOGIN_POD" -- sinfo -N | tee "$EVID/sinfo.txt"
 kubectl exec -n slurm "$LOGIN_POD" -- scontrol release "$JOBID"
@@ -47,9 +60,11 @@ kubectl exec -n slurm "$LOGIN_POD" -- bash -lc 'sbatch --hold --partition=mixing
 JOBID=$(grep -oE '[0-9]+' "$EVID/submit.txt" | tail -1); echo "JOBID=$JOBID" | tee "$EVID/jobid.txt"
 for i in $(seq 1 12); do kubectl get jobset -n slurm-jobs -o name | grep -q "$JOBID" && break; sleep 5; done
 echo "Wait for JobSet pods..."
-for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); [ -n "$POD" ] && break; sleep 5; done
+for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true); [ -n "$POD" ] && break; sleep 5; done
 kubectl wait --for=condition=Ready pod -n slurm-jobs --selector="k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" --timeout=180s 2>&1 || true
-POD=$(kubectl get pods -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" -o jsonpath='{.items[0].metadata.name}')
+# The pod may already be gone by now (short job); the two probes below were
+# always `|| true`, so keep the lookup non-fatal rather than aborting TC-B5..B7.
+POD=$(kubectl get pods -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$JOBID" -o jsonpath='{.items[0].metadata.name}' || true)
 kubectl get pod "$POD" -n slurm-jobs -o jsonpath='{.spec.containers[*].name}' | tee "$EVID/containers.txt" || true
 kubectl get pod "$POD" -n slurm-jobs -o jsonpath='{.spec.volumes[*].name}' | tee "$EVID/volumes.txt" || true
 kubectl exec -n slurm "$LOGIN_POD" -- scontrol release "$JOBID"
@@ -65,10 +80,10 @@ IDA=$(grep -oE '[0-9]+' "$EVID/submitA.txt" | tail -1)
 kubectl exec -n slurm "$LOGIN_POD" -- bash -lc 'sbatch --hold --partition=mixing --ntasks=1 --cpus-per-task=1 --wrap="srun sleep 120"' | tee "$EVID/submitB.txt"
 IDB=$(grep -oE '[0-9]+' "$EVID/submitB.txt" | tail -1)
 echo "Wait for JobSet pods..."
-for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$IDA" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); [ -n "$POD" ] && break; sleep 5; done
+for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$IDA" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true); [ -n "$POD" ] && break; sleep 5; done
 kubectl wait --for=condition=Ready pod -n slurm-jobs --selector="k8s-bridge.x-k8s.io/slurm-job-id=$IDA" --timeout=180s 2>&1 || true
 echo "Wait for JobSet pods..."
-for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$IDB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); [ -n "$POD" ] && break; sleep 5; done
+for i in $(seq 1 12); do POD=$(kubectl get pod -n slurm-jobs -l "k8s-bridge.x-k8s.io/slurm-job-id=$IDB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true); [ -n "$POD" ] && break; sleep 5; done
 kubectl wait --for=condition=Ready pod -n slurm-jobs --selector="k8s-bridge.x-k8s.io/slurm-job-id=$IDB" --timeout=180s 2>&1 || true
 kubectl exec -n slurm "$LOGIN_POD" -- sinfo -N -o '%N %f' | tee "$EVID/features.txt"
 kubectl exec -n slurm "$LOGIN_POD" -- scontrol release "$IDA" "$IDB"

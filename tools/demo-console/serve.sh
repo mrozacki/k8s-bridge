@@ -80,7 +80,12 @@ fi
 
 # --- 2. status API ----------------------------------------------------------
 echo "[2/3] Starting status API on ${BIND_ADDR}:${STATUS_PORT}"
-node "${SCRIPT_DIR}/status-api.js" "${STATUS_PORT}" >/tmp/demo-console-status.log 2>&1 &
+# DEMO_CONSOLE_PAGE_PORT tells the status API which localhost origin is allowed
+# to read /status (the page runs on a different port, so it is a cross-origin
+# fetch). Without this it would only trust its built-in 8842 default and a
+# custom PAGE_PORT would be blocked by CORS.
+DEMO_CONSOLE_PAGE_PORT="${PAGE_PORT}" \
+  node "${SCRIPT_DIR}/status-api.js" "${STATUS_PORT}" >/tmp/demo-console-status.log 2>&1 &
 STATUS_PID=$!
 PIDS+=("${STATUS_PID}")
 sleep 0.3

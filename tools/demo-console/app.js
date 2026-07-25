@@ -21,10 +21,32 @@
     return u.searchParams.get(name);
   }
 
+  // All three URLs below can come from a query param, i.e. from whatever link
+  // the presenter clicked. Two of them end up as an iframe src, where a
+  // "javascript:" or "data:" URI would execute in THIS page's origin — the
+  // same page that embeds a ttyd frame backed by a real writable shell. So
+  // only http/https survives; anything else falls back to the built-in
+  // default and is logged, never silently honoured.
+  //
+  // Parsed without a base URL on purpose: every real value (config.js from
+  // serve.sh, or a documented ?ttyd=/?grafana= link) is absolute, so a relative
+  // one is junk worth reporting rather than quietly resolving against the page.
+  function safeUrl(value, fallback, label) {
+    if (!value) return fallback;
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
+    } catch (e) {
+      // unparseable / not absolute — treated exactly like a rejected scheme
+    }
+    console.warn('demo-console: rejected ' + label + ' URL (only absolute http/https allowed): ' + value);
+    return fallback;
+  }
+
   const cfg = window.DEMO_CONSOLE_CONFIG || {};
-  const TTYD_URL = qparam('ttyd') || cfg.ttydUrl || (window.location.protocol + '//' + window.location.hostname + ':7681');
-  const GRAFANA_URL = qparam('grafana') || cfg.grafanaUrl || '';
-  const STATUS_API_URL = qparam('statusApi') || cfg.statusApiUrl || (window.location.protocol + '//' + window.location.hostname + ':8843/status');
+  const TTYD_URL = safeUrl(qparam('ttyd') || cfg.ttydUrl, window.location.protocol + '//' + window.location.hostname + ':7681', 'ttyd');
+  const GRAFANA_URL = safeUrl(qparam('grafana') || cfg.grafanaUrl, '', 'grafana');
+  const STATUS_API_URL = safeUrl(qparam('statusApi') || cfg.statusApiUrl, window.location.protocol + '//' + window.location.hostname + ':8843/status', 'statusApi');
 
   // ---------- Cheat sheet ----------
 
@@ -161,7 +183,15 @@
     if (GRAFANA_URL) {
       header.textContent = 'Grafana';
       const wrap = document.getElementById('dashboard-body');
-      wrap.innerHTML = '<iframe id="grafana-frame" src="' + GRAFANA_URL + '"></iframe>';
+      // Build the iframe as a DOM node instead of concatenating GRAFANA_URL
+      // into innerHTML: the URL is query-param controlled, so interpolating
+      // it here is a DOM-XSS sink (a crafted ?grafana= link could inject
+      // arbitrary markup into the page hosting the terminal iframe).
+      wrap.innerHTML = '';
+      const gframe = document.createElement('iframe');
+      gframe.id = 'grafana-frame';
+      gframe.setAttribute('src', GRAFANA_URL);
+      wrap.appendChild(gframe);
     } else {
       header.textContent = 'Status strip (no GRAFANA_URL set)';
       renderStatusStrip();

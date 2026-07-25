@@ -20,21 +20,49 @@ jesc() { # JSON-escape a string for embedding in a hand-built JSON blob
   printf '%s' "$s"
 }
 
+# json_objects KEY... — reads rows on stdin and prints them as a comma-separated
+# list of JSON objects, mapping the Nth field of each row to the Nth KEY.
+# Fields are separated by \037 (ASCII unit separator): it cannot occur in
+# kubectl/squeue output and, unlike a tab, bash's read does not collapse runs of
+# it, so empty fields survive.
+#
+# Why not interpolate awk output straight into the JSON like this used to?
+# Because these values are free-form text. squeue's %r reason field in
+# particular is a human-readable string that can contain a double quote, which
+# produced a malformed JSON body the page then failed to parse. Every value
+# goes through jesc() here instead, so no field can break out of its string.
+# (Deliberately not jq: the whole demo console is dependency-free — node core
+# modules and bash only — and jq is optional everywhere else in this repo.)
+json_objects() {
+  local keys=("$@") out="" obj i
+  local -a f
+  while IFS=$'\037' read -r -a f; do
+    obj=""
+    for i in "${!keys[@]}"; do
+      [ -n "$obj" ] && obj="${obj},"
+      obj="${obj}\"${keys[$i]}\":\"$(jesc "${f[$i]:-}")\""
+    done
+    [ -n "$out" ] && out="${out},"
+    out="${out}{${obj}}"
+  done
+  printf '%s' "$out"
+}
+
 context="$(kubectl config current-context 2>/dev/null || true)"
 
-nodes_json="$(kubectl get nodes --no-headers 2>/dev/null | awk '{printf "{\"name\":\"%s\",\"status\":\"%s\"},", $1, $2}' | sed 's/,$//')"
+nodes_json="$(kubectl get nodes --no-headers 2>/dev/null | awk '{printf "%s\037%s\n", $1, $2}' | json_objects name status)"
 
-queues_json="$(kubectl get clusterqueues --no-headers 2>/dev/null | awk '{printf "{\"name\":\"%s\",\"pending\":\"%s\"},", $1, $NF}' | sed 's/,$//')"
+queues_json="$(kubectl get clusterqueues --no-headers 2>/dev/null | awk '{printf "%s\037%s\n", $1, $NF}' | json_objects name pending)"
 
-workloads_json="$(kubectl get workloads -A --no-headers 2>/dev/null | awk '{printf "{\"namespace\":\"%s\",\"name\":\"%s\",\"queue\":\"%s\",\"admitted\":\"%s\",\"age\":\"%s\"},", $1, $2, $3, $5, $NF}' | sed 's/,$//')"
+workloads_json="$(kubectl get workloads -A --no-headers 2>/dev/null | awk '{printf "%s\037%s\037%s\037%s\037%s\n", $1, $2, $3, $5, $NF}' | json_objects namespace name queue admitted age)"
 
-jobsets_json="$(kubectl get jobsets -n slurm-jobs --no-headers 2>/dev/null | awk '{printf "{\"name\":\"%s\",\"restarts\":\"%s\",\"suspended\":\"%s\"},", $1, $3, $5}' | sed 's/,$//')"
+jobsets_json="$(kubectl get jobsets -n slurm-jobs --no-headers 2>/dev/null | awk '{printf "%s\037%s\037%s\n", $1, $3, $5}' | json_objects name restarts suspended)"
 
 squeue_json="$(kubectl -n slurm exec deploy/slurm-login-slinky -- squeue -h -o "%i|%P|%T|%r" 2>/dev/null \
-  | awk -F'|' '{printf "{\"id\":\"%s\",\"partition\":\"%s\",\"state\":\"%s\",\"reason\":\"%s\"},", $1, $2, $3, $4}' | sed 's/,$//')"
+  | awk -F'|' '{printf "%s\037%s\037%s\037%s\n", $1, $2, $3, $4}' | json_objects id partition state reason)"
 
 sinfo_json="$(kubectl -n slurm exec deploy/slurm-login-slinky -- sinfo -h -N -o "%N|%P|%t" 2>/dev/null \
-  | awk -F'|' '{printf "{\"node\":\"%s\",\"partition\":\"%s\",\"state\":\"%s\"},", $1, $2, $3}' | sed 's/,$//')"
+  | awk -F'|' '{printf "%s\037%s\037%s\n", $1, $2, $3}' | json_objects node partition state)"
 
 bridge_ready="$(kubectl get workloadmixing -A -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | head -1)"
 [ -z "$bridge_ready" ] && bridge_ready="unknown"

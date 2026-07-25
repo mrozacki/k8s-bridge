@@ -15,7 +15,10 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = Number(process.argv[2] || process.env.DEMO_CONSOLE_PORT || 8842);
-const ROOT = path.resolve(process.argv[3] || __dirname);
+// realpathSync so the containment checks below compare fully-resolved paths.
+// On macOS /tmp is itself a symlink to /private/tmp, so an unresolved ROOT
+// would make every single request look like an escape attempt.
+const ROOT = fs.realpathSync(path.resolve(process.argv[3] || __dirname));
 const HOST = '127.0.0.1';
 
 const MIME = {
@@ -28,35 +31,64 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+// A bare startsWith(ROOT) is not containment: a SIBLING directory sharing the
+// prefix (ROOT ".../demo-console" vs ".../demo-console-secrets/x") passes it.
+// Require the path separator, or an exact match on the root itself.
+function withinRoot(p) {
+  return p === ROOT || p.startsWith(ROOT + path.sep);
+}
+
 function safeJoin(root, urlPath) {
   const decoded = decodeURIComponent(urlPath.split('?')[0]);
   const target = path.normalize(path.join(root, decoded));
-  if (!target.startsWith(root)) return null; // block path traversal
+  if (!withinRoot(target)) return null; // block path traversal
   return target;
 }
 
+// Second gate: the string check above cannot see through symlinks, and a link
+// INSIDE the root can point anywhere on disk. Resolve the real path and
+// re-check containment before reading. A missing file resolves to null (ENOENT
+// is expected, not exceptional) so the caller falls back / 404s cleanly.
+function resolveInsideRoot(filePath, cb) {
+  fs.realpath(filePath, (err, real) => {
+    if (err) {
+      cb(null);
+      return;
+    }
+    cb(withinRoot(real) ? real : null);
+  });
+}
+
+function serveFile(filePath, res) {
+  const ext = path.extname(filePath);
+  fs.readFile(filePath, (readErr, data) => {
+    if (readErr) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.end(data);
+  });
+}
+
 const server = http.createServer((req, res) => {
-  let filePath = safeJoin(ROOT, req.url === '/' ? '/index.html' : req.url);
-  if (!filePath) {
+  const requested = safeJoin(ROOT, req.url === '/' ? '/index.html' : req.url);
+  if (!requested) {
     res.writeHead(400);
     res.end('Bad request');
     return;
   }
 
-  fs.stat(filePath, (err, stat) => {
-    if (err || !stat.isFile()) {
-      // SPA-ish fallback: unknown paths still serve index.html
-      filePath = path.join(ROOT, 'index.html');
+  resolveInsideRoot(requested, (resolved) => {
+    // SPA-ish fallback: unknown paths — and anything whose real path escaped
+    // the root via a symlink — still serve index.html.
+    if (!resolved) {
+      serveFile(path.join(ROOT, 'index.html'), res);
+      return;
     }
-    const ext = path.extname(filePath);
-    fs.readFile(filePath, (readErr, data) => {
-      if (readErr) {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Not found');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-      res.end(data);
+    fs.stat(resolved, (err, stat) => {
+      serveFile(err || !stat.isFile() ? path.join(ROOT, 'index.html') : resolved, res);
     });
   });
 });
