@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -213,6 +214,26 @@ func TestSupervisorLifecyclePerCR(t *testing.T) {
 	}
 }
 
+// updateSpec mutates the named CR's spec and stamps a new generation,
+// retrying on optimistic-concurrency conflicts. Once a bridge is running,
+// its status writer updates the SAME object concurrently with the test's
+// Get→mutate→Update, so a bare Update flakes with "object was modified"
+// (seen live in CI). Each retry re-Gets a fresh copy before mutating.
+func updateSpec(t *testing.T, s *Supervisor, key types.NamespacedName, generation int64, mutate func(*v1alpha1.WorkloadMixing)) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		wm := &v1alpha1.WorkloadMixing{}
+		if err := s.Kube.Get(context.Background(), key, wm); err != nil {
+			return err
+		}
+		mutate(wm)
+		wm.Generation = generation // the fake client does not bump generation itself
+		return s.Kube.Update(context.Background(), wm)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestSupervisorHotReloadVsRestart pins the restart rule: a spec change that
 // leaves the Slurm client's construction-time fields intact is applied to
 // the SAME Bridge via setCfg; a change to any of those fields replaces the
@@ -235,14 +256,9 @@ func TestSupervisorHotReloadVsRestart(t *testing.T) {
 	}
 
 	// Hot-reload: localQueue changes, endpoint fields don't.
-	if err := s.Kube.Get(context.Background(), key, wm); err != nil {
-		t.Fatal(err)
-	}
-	wm.Spec.LocalQueue = "other-queue"
-	wm.Generation = 2 // the fake client does not bump generation itself
-	if err := s.Kube.Update(context.Background(), wm); err != nil {
-		t.Fatal(err)
-	}
+	updateSpec(t, s, key, 2, func(wm *v1alpha1.WorkloadMixing) {
+		wm.Spec.LocalQueue = "other-queue"
+	})
 	mustReconcile(t, s, "wm")
 	entry2, _ := s.get(key)
 	if entry2.bridge != entry1.bridge {
@@ -254,14 +270,9 @@ func TestSupervisorHotReloadVsRestart(t *testing.T) {
 
 	// Restart: the slurmRestURL is baked into the client, so the bridge must
 	// be replaced and the old loop stopped.
-	if err := s.Kube.Get(context.Background(), key, wm); err != nil {
-		t.Fatal(err)
-	}
-	wm.Spec.SlurmRestURL = "https://b:6820"
-	wm.Generation = 3
-	if err := s.Kube.Update(context.Background(), wm); err != nil {
-		t.Fatal(err)
-	}
+	updateSpec(t, s, key, 3, func(wm *v1alpha1.WorkloadMixing) {
+		wm.Spec.SlurmRestURL = "https://b:6820"
+	})
 	mustReconcile(t, s, "wm")
 	entry3, _ := s.get(key)
 	if entry3.bridge == entry1.bridge {
@@ -343,28 +354,18 @@ func TestSupervisorInvalidSpec(t *testing.T) {
 
 	// Fix the spec, start the bridge, then break it again: the bridge must
 	// keep running on the last-good config.
-	if err := s.Kube.Get(context.Background(), key, wm); err != nil {
-		t.Fatal(err)
-	}
-	wm.Spec = specWith("https://a:6820", "mixing")
-	wm.Generation = 2
-	if err := s.Kube.Update(context.Background(), wm); err != nil {
-		t.Fatal(err)
-	}
+	updateSpec(t, s, key, 2, func(wm *v1alpha1.WorkloadMixing) {
+		wm.Spec = specWith("https://a:6820", "mixing")
+	})
 	mustReconcile(t, s, "wm")
 	entry, running := s.get(key)
 	if !running {
 		t.Fatal("bridge not started after the spec was fixed")
 	}
 
-	if err := s.Kube.Get(context.Background(), key, wm); err != nil {
-		t.Fatal(err)
-	}
-	wm.Spec.PartitionMappings = nil
-	wm.Generation = 3
-	if err := s.Kube.Update(context.Background(), wm); err != nil {
-		t.Fatal(err)
-	}
+	updateSpec(t, s, key, 3, func(wm *v1alpha1.WorkloadMixing) {
+		wm.Spec.PartitionMappings = nil
+	})
 	mustReconcile(t, s, "wm")
 	got, stillRunning := s.get(key)
 	if !stillRunning || got.bridge != entry.bridge {
@@ -399,14 +400,9 @@ func TestSupervisorInvalidSpec(t *testing.T) {
 	// Fixing the spec hands the condition back to tick health: the very
 	// next tick report must write True even though the bridge's tick state
 	// was "ok" the whole time (the ClearRejection debounce reset).
-	if err := s.Kube.Get(context.Background(), key, wm); err != nil {
-		t.Fatal(err)
-	}
-	wm.Spec = specWith("https://a:6820", "mixing")
-	wm.Generation = 4
-	if err := s.Kube.Update(context.Background(), wm); err != nil {
-		t.Fatal(err)
-	}
+	updateSpec(t, s, key, 4, func(wm *v1alpha1.WorkloadMixing) {
+		wm.Spec = specWith("https://a:6820", "mixing")
+	})
 	mustReconcile(t, s, "wm")
 	got, _ = s.get(key)
 	got.bridge.OnTick(nil)
