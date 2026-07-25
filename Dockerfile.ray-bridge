@@ -1,7 +1,11 @@
 # Multi-stage build for the ray-bridge controller (sibling to k8s-bridge,
 # ADR-0012 — separate binary, separate image, shares the internal library).
 # Build context is this directory (.).
-FROM golang:1.26 AS build
+# L4 (base images pinned by digest, closes backlog SEC2): tag kept for
+# readability, digest is what is actually pulled — same pin, same reasoning and
+# deliberately the same digest as the k8s-bridge image, so the two binaries are
+# always built by an identical toolchain. See Dockerfile for the full note.
+FROM golang:1.26@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS build
 WORKDIR /src
 
 # Cache module downloads separately from source changes.
@@ -15,7 +19,8 @@ COPY . .
 # image.
 RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -o /out/ray-bridge ./cmd/ray-bridge
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# Digest-pinned (L4 / SEC2) and kept identical to the k8s-bridge image's base.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
 COPY --from=build /out/ray-bridge /ray-bridge
 
 ENTRYPOINT ["/ray-bridge"]
