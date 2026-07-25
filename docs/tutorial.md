@@ -129,13 +129,18 @@ kubectl -n slurm get secret slurm-auth-slurm -o yaml | sed 's/namespace: slurm/n
 kubectl port-forward -n slurm svc/slurm-restapi 6820:6820 &
 kubectl -n slurm exec slurm-controller-0 -c slurmctld -- scontrol token username=root lifespan=14400 | sed 's/SLURM_JWT=//' > /tmp/wm-slurm-token
 kubectl apply -f ../../deploy/crd/workloadmixing-sample.yaml
-# The sample CR points at the in-cluster service DNS name, which does not
-# resolve from your workstation — point it at the port-forward instead.
+# The sample CR is the IN-CLUSTER shape: an https service DNS name that does
+# not resolve from your workstation, and a token path under the cluster's
+# Secret mount. Point both at your local setup instead.
 # Do this BEFORE starting the binary: endpoint fields (slurmRestURL, token,
 # TLS) are baked into the Slurm client at construction time, so in
 # single-CR mode changing them later requires restarting the controller.
+# Note allowInsecureHTTP: the CRD refuses a plaintext URL without it, by
+# design — the Slurm token is bearer-equivalent, so sending it over http is
+# something you have to say out loud. It is acceptable here because the
+# traffic never leaves your machine (127.0.0.1 via the port-forward).
 kubectl -n slurm-jobs patch workloadmixing playground --type=merge \
-  -p '{"spec":{"slurmRestURL":"http://127.0.0.1:6820"}}'
+  -p '{"spec":{"slurmRestURL":"http://127.0.0.1:6820","allowInsecureHTTP":true,"slurmTokenFile":"/tmp/wm-slurm-token"}}'
 cd ../../. && make build
 ./bin/k8s-bridge --workloadmixing slurm-jobs/playground &
 kubectl get workloadmixing -n slurm-jobs playground -o yaml | grep -A3 conditions   # Ready=True

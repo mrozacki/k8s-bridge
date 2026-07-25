@@ -6,17 +6,28 @@ metadata:
   name: playground
   namespace: slurm-jobs
 spec:
-  # Local dev used a plaintext localhost endpoint; that now requires an explicit
-  # opt-in (the CRD's CEL rule rejects http:// otherwise). In-cluster, use https.
-  slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
-  allowInsecureHTTP: true
+  # This sample is the IN-CLUSTER shape (that is what the service DNS name
+  # below means), so it is secure-by-default: https, and no allowInsecureHTTP.
+  # A plaintext endpoint needs an explicit opt-in — the CRD's CEL rule rejects
+  # http:// without it. Running the bridge from a workstation against a
+  # port-forward is the one case that needs the opt-in; docs/tutorial.md patches
+  # both fields there instead of weakening this file (a sample gets copied into
+  # real clusters, so it must not ship the insecure combination).
+  slurmRestURL: "https://slurm-restapi.slurm.svc.cluster.local:6820"
   # slurmUser is deliberately unset: empty omits the X-SLURM-USER-NAME
   # header, so slurmrestd acts as the user the JWT was minted for. Set it
   # ONLY to a user that actually exists in your Slurm cluster (e.g. a
   # dedicated low-privilege REST user) — a non-existent user makes every
   # job update fail with "Invalid user id", and the bridge can then never
   # release held jobs.
-  slurmTokenFile: "/tmp/wm-slurm-token"
+  # The chart's canonical mount point for the token Secret. It is also inside
+  # the controller's default --allowed-token-paths (ADR-0017): in supervisor
+  # mode a CR may only name a token path the platform admin allowed, since the
+  # controller reads it from its OWN filesystem and sends it to this CR's
+  # slurmRestURL. The workstation tutorial reads a token from /tmp instead,
+  # which is fine there — it runs in explicit single-CR mode, where the config
+  # source is admin-chosen and the allowlist deliberately does not apply.
+  slurmTokenFile: "/var/run/secrets/slurm/token"
   localQueue: "team-a"
   pollInterval: "10s"
   maxUserPriority: 10000 # cap user-originated priority requests (security audit H1)

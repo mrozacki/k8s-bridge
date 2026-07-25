@@ -22,6 +22,28 @@ fullnameOverride: ""
 allowedSlurmdImages:
   - "ghcr.io/slinkyproject/"
 
+# Controller-level trust anchor (ADR-0017), same reasoning as
+# allowedSlurmdImages above: in supervisor mode (configSource: cr without
+# workloadmixing.name) the controller adopts EVERY WorkloadMixing CR in this
+# namespace, and two CR fields — slurmTokenFile and slurmCACertFile — name files
+# on the CONTROLLER's filesystem whose contents it sends to the CR's own
+# slurmRestURL. Unrestricted, that is an arbitrary-file read wired to a sink the
+# CR author chooses (e.g. the controller's ServiceAccount token). These prefixes
+# bound it; a CR naming anything else is refused with Ready=False/InvalidSpec.
+# Widen this list if you mount tokens somewhere else. Empty disables the check
+# (the controller logs a warning in supervisor mode).
+allowedTokenPaths:
+  - "/var/run/secrets/"
+  - "/etc/k8s-bridge/"
+
+# Controller-level trust anchor (ADR-0017): whether a WorkloadMixing CR may set
+# slurmInsecureSkipTLSVerify, i.e. turn OFF slurmrestd certificate verification
+# for its own loop. Left to the CR this is a silent downgrade the CR author
+# grants themselves — and unlike the http:// case, a CRD CEL rule cannot gate
+# it, because the CR author is exactly who sets the field. So the
+# acknowledgement lives here, with the platform admin. Development only.
+allowInsecureTLS: false
+
 # Measured baseline: 88Mi RSS at 5000 jobs, 1.6% CPU (scale test).
 # Requests reflect steady-state; limits leave headroom for larger backlogs
 # without being generous enough to mask a real leak/regression. The 20k-job
@@ -248,8 +270,18 @@ config:
   # Use https so the bearer-equivalent Slurm token is not sent in cleartext.
   # For a plaintext in-cluster endpoint you must set allowInsecureHTTP: true
   # (see values-gke-test.yaml for the test-environment override).
-  slurmRestURL: "http://slurm-restapi.slurm.svc.cluster.local:6820"
-  allowInsecureHTTP: true
+  #
+  # Security regression fixed 2026-07-25: these two lines had drifted to
+  # "http:// + allowInsecureHTTP: true", so a default `helm install` shipped
+  # the Slurm JWT in cleartext — contradicting both the comment above and
+  # this chart's documented defaults (README.md: https, opt-in unset).
+  # Plaintext is now opt-in ONLY, exactly as values-gke-test.yaml assumes when
+  # it calls itself "the single place test-only drift lives". Every in-repo
+  # consumer of the plaintext path already sets the opt-in explicitly
+  # (test/e2e/run.sh, run-real-slurm.sh, the experiments' own values files),
+  # so this default costs them nothing.
+  slurmRestURL: "https://slurm-restapi.slurm.svc.cluster.local:6820"
+  # allowInsecureHTTP: true
   # slurmCACertFile: /etc/k8s-bridge/ca.crt
   slurmTokenFile: "/var/run/secrets/slurm/token"
   # X-SLURM-USER-NAME sent with the token. MUST be a REAL Slurm user — an
