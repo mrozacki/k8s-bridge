@@ -1,6 +1,11 @@
 # Code owners are requested for review automatically on matching PRs.
-# Replace the placeholder team/handles before publication (GitHub handles only,
-# no personal email). See MAINTAINERS.md.
+# GitHub handles only, no personal email. See MAINTAINERS.md.
+#
+# NOTE: CODEOWNERS only *requests* review; it is enforced as a merge
+# requirement solely by a branch-protection rule ("Require review from Code
+# Owners"). With a single maintainer that rule would block every PR, so it is
+# deliberately not enabled — this file documents ownership and drives review
+# requests. Revisit when a second maintainer joins (MAINTAINERS.md).
 
 # Default owner for everything.
 *                       @mrozacki
