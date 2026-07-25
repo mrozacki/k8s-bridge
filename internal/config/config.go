@@ -389,6 +389,21 @@ func ValidateImageAllowed(image string, allowed []string) error {
 	return fmt.Errorf("slurmd image %q is not in the allowlist %v", image, allowed)
 }
 
+// DefaultAllowedTokenPaths is the default value of --allowed-token-paths, and
+// the single source of truth for it: main.go builds the flag default from this
+// slice and TestDefaultAllowedTokenPathsRefuseServiceAccountToken asserts its
+// security property, so the shipped default cannot drift away from the tested
+// one. deploy/chart/k8s-bridge/values.yaml carries the same list, and the
+// installation-docs e2e (phase A5) asserts the chart agrees with this.
+//
+// It is DELIBERATELY /var/run/secrets/slurm/ and not /var/run/secrets/: the
+// wider prefix contains /var/run/secrets/kubernetes.io/serviceaccount/token,
+// i.e. the controller's own identity — the exact file ADR-0017 exists to keep
+// a CR author from reading. /var/run/secrets/slurm is where the chart actually
+// mounts the Slurm token Secret (templates/deployment.yaml), so nothing
+// legitimate needs the wider form.
+var DefaultAllowedTokenPaths = []string{"/var/run/secrets/slurm/", "/etc/k8s-bridge/"}
+
 // ValidateFilePathAllowed reports whether a CR-supplied file path is inside one
 // of the allowed directory prefixes (security audit H2).
 //

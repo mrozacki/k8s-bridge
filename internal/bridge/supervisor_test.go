@@ -444,7 +444,11 @@ func TestSupervisorTokenPathAllowlist(t *testing.T) {
 	wm := newWorkloadMixing("wm", "slurm-jobs", spec)
 	wm.Generation = 1
 	s := startedSupervisor(t, wm)
-	s.AllowedTokenPaths = []string{"/var/run/secrets/slurm/", "/etc/k8s-bridge/"}
+	// Use the SHIPPED default, not a hand-picked list. An earlier version of
+	// this test passed with a narrower list while the real default admitted the
+	// ServiceAccount token — see config.DefaultAllowedTokenPaths and ADR-0017's
+	// postscript.
+	s.AllowedTokenPaths = config.DefaultAllowedTokenPaths
 
 	mustReconcile(t, s, "wm")
 	if _, running := s.get(types.NamespacedName{Namespace: "slurm-jobs", Name: "wm"}); running {
@@ -461,7 +465,7 @@ func TestSupervisorTokenPathAllowlist(t *testing.T) {
 	ok := newWorkloadMixing("ok", "slurm-jobs", spec)
 	ok.Generation = 1
 	s2 := startedSupervisor(t, ok)
-	s2.AllowedTokenPaths = []string{"/var/run/secrets/slurm/", "/etc/k8s-bridge/"}
+	s2.AllowedTokenPaths = config.DefaultAllowedTokenPaths
 	mustReconcile(t, s2, "ok")
 	if _, running := s2.get(types.NamespacedName{Namespace: "slurm-jobs", Name: "ok"}); !running {
 		t.Fatalf("bridge did not start for an allowed token path; Ready = %+v", readyCondition(t, s2, "ok"))

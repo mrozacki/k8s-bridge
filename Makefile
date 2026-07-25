@@ -196,3 +196,25 @@ manifests: generate
 # deliberately changes the schema (status.conditions -> metav1.Condition), so
 # the frozen reference stopped being a truth to compare against. The LASTING
 # gates are manifests-drift (ci.yaml) and crd-sync-gate (chart-ci.yaml).
+
+# --- Appended: installation-docs e2e (test/e2e/run-installation-docs.sh) ---
+# Same append-only convention as the block above: concurrent sessions own the
+# targets earlier in this file.
+
+.PHONY: e2e-installation-docs e2e-installation-docs-static
+
+# e2e-installation-docs-static runs ONLY the static phase: no cluster, no
+# container runtime, seconds — it reads docs/installation.md and asserts every
+# documented `--set` key, documented command, and advertised secure default
+# still matches the chart. Cheap enough for a per-PR gate; requires helm only.
+e2e-installation-docs-static:
+	PHASE=static ./test/e2e/run-installation-docs.sh
+
+# e2e-installation-docs adds the live kind phases: the three documented
+# install shapes (§4.1 file mode, §4.2 supervisor mode with the shipped sample
+# CR, §4.2 single-CR binding) plus the ADR-0017 negative tests. Requires kind,
+# docker, kubectl, helm; takes minutes. See the script header for what it
+# deliberately does NOT cover (no real Slurm; cert-manager/KubeRay/
+# slurm-operator prerequisites are out of scope).
+e2e-installation-docs:
+	./test/e2e/run-installation-docs.sh

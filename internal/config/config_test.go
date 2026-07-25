@@ -319,6 +319,15 @@ func TestValidateFilePathAllowed(t *testing.T) {
 	if err := ValidateFilePathAllowed("slurmTokenFile", "/var/run/secretsomething/token", noSlash); err == nil {
 		t.Error("prefix without a trailing separator must not match a sibling sharing the string")
 	}
+	// A prefix that CONTAINS the projected ServiceAccount volume is the mistake
+	// that shipped first: /var/run/secrets/ looks like "the secrets directory",
+	// but kubelet also projects the pod's own identity under it. Pinned here so
+	// nobody widens the default back to it by reflex.
+	tooWide := []string{"/var/run/secrets/"}
+	if err := ValidateFilePathAllowed("slurmTokenFile", "/var/run/secrets/kubernetes.io/serviceaccount/token", tooWide); err == nil {
+		t.Log("/var/run/secrets/ admits the ServiceAccount token — this is why DefaultAllowedTokenPaths is narrower; see TestDefaultAllowedTokenPathsRefuseServiceAccountToken")
+	}
+
 	// The prefix itself naming a file exactly (an operator pinning one path).
 	exact := []string{"/etc/k8s-bridge/token"}
 	if err := ValidateFilePathAllowed("slurmTokenFile", "/etc/k8s-bridge/token", exact); err != nil {
@@ -344,5 +353,35 @@ func TestPrivilegedDefaultsTrue(t *testing.T) {
 	}
 	if cfg.Slurmd.PrivilegedOrDefault() {
 		t.Error("privileged: false must be honored")
+	}
+}
+
+// TestDefaultAllowedTokenPathsRefuseServiceAccountToken is the regression test
+// for a bug this project shipped and the installation-docs e2e caught: the
+// mechanism (ValidateFilePathAllowed) was correct, but the DEFAULT was
+// /var/run/secrets/, which contains the pod's own projected ServiceAccount
+// token — so the shipped configuration admitted precisely the attack ADR-0017
+// was written to stop, while the unit tests passed because they exercised a
+// narrower list than the one that shipped.
+//
+// The lesson encoded here: assert the value you SHIP, not a convenient one.
+func TestDefaultAllowedTokenPathsRefuseServiceAccountToken(t *testing.T) {
+	mustRefuse := []string{
+		"/var/run/secrets/kubernetes.io/serviceaccount/token",
+		"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+		"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+	}
+	for _, p := range mustRefuse {
+		if err := ValidateFilePathAllowed("slurmTokenFile", p, DefaultAllowedTokenPaths); err == nil {
+			t.Errorf("DefaultAllowedTokenPaths %v must refuse %q — that file is the controller's own identity", DefaultAllowedTokenPaths, p)
+		}
+	}
+	// ...while still admitting where the chart actually mounts the Slurm token
+	// (deploy/chart/k8s-bridge/templates/deployment.yaml) and the config dir.
+	mustAllow := []string{"/var/run/secrets/slurm/token", "/etc/k8s-bridge/ca.crt"}
+	for _, p := range mustAllow {
+		if err := ValidateFilePathAllowed("slurmTokenFile", p, DefaultAllowedTokenPaths); err != nil {
+			t.Errorf("DefaultAllowedTokenPaths %v must admit %q (the chart's own mount points): %v", DefaultAllowedTokenPaths, p, err)
+		}
 	}
 }

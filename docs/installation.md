@@ -307,6 +307,13 @@ helm install k8s-bridge deploy/chart/k8s-bridge \
   --set workloadmixing.name=playground
 ```
 
+> **The CR must exist before this `helm install`.** In single-CR mode the
+> controller loads its config from that one named CR at startup and exits if it
+> is missing, so installing first into a fresh namespace yields a
+> `CrashLoopBackOff` until you apply the CR. Apply it first, or install
+> supervisor-style (§4.2 above) and add CRs whenever you like — the supervisor
+> starts and stops loops as CRs come and go.
+
 ### 4.3 Fields worth setting explicitly
 
 From `internal/config/config.go` / `deploy/chart/k8s-bridge/values.yaml`:

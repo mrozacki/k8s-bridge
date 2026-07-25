@@ -33,7 +33,7 @@ allowedSlurmdImages:
 # Widen this list if you mount tokens somewhere else. Empty disables the check
 # (the controller logs a warning in supervisor mode).
 allowedTokenPaths:
-  - "/var/run/secrets/"
+  - "/var/run/secrets/slurm/"
   - "/etc/k8s-bridge/"
 
 # Controller-level trust anchor (ADR-0017): whether a WorkloadMixing CR may set
@@ -315,9 +315,15 @@ config:
   partitionMappings:
     - partitionName: "mixing"
       workloadPriorityClass: "normal-priority"
-    - partitionName: "mixing-gpu"
-      workloadPriorityClass: "normal-priority"
-      localQueue: "dws-gpu-lq"
+    # NOTE: the second mapping is commented out because its localQueue,
+    # "dws-gpu-lq", is created by this repo's DWS/GPU scale experiment, NOT by
+    # the queue objects docs/installation.md §2 tells you to create. Shipped
+    # active, it pointed a default install at a LocalQueue that does not exist,
+    # so any job submitted to the "mixing-gpu" partition would sit unadmitted.
+    # Uncomment and point localQueue at a queue you actually created.
+    # - partitionName: "mixing-gpu"
+    #   workloadPriorityClass: "normal-priority"
+    #   localQueue: "dws-gpu-lq"
   slurmd:
     # Digest-pin the privileged slurmd image before production.
     image: "ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04"

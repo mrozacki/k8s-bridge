@@ -48,7 +48,32 @@ should not also require an RBAC change.
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end -}}
 
-{{- $namespaces := list .Values.config.namespace -}}
+{{- /*
+Which namespaces get a Role. This used to seed unconditionally from
+config.namespace, which is wrong in CR mode: `config` is ignored there (see
+docs/installation.md §4.2), so a CR-mode install into namespace "foo" ALSO
+rendered a Role/RoleBinding into config.namespace's default "slurm-jobs" — a
+namespace the operator never named, against this chart's own least-privilege
+default (H4) — and a second CR-mode release then failed to install outright,
+colliding with the first release's Role there. Found by the installation-docs
+e2e running §4.2's documented command verbatim.
+
+  file mode      -> config.namespace (that IS the managed namespace)
+  cr, supervisor -> the release namespace (the supervisor watches POD_NAMESPACE
+                    only; the template above hard-fails any other value)
+  cr, single-CR  -> the bound CR's namespace, which is where its JobSets go
+
+plus rbac.extraNamespaces, plus the release namespace when leader election is
+on (the Lease lives there).
+*/}}
+{{- $namespaces := list -}}
+{{- if eq .Values.configSource "file" -}}
+{{- $namespaces = append $namespaces .Values.config.namespace -}}
+{{- else if .Values.workloadmixing.name -}}
+{{- $namespaces = append $namespaces (.Values.workloadmixing.namespace | default .Release.Namespace) -}}
+{{- else -}}
+{{- $namespaces = append $namespaces .Release.Namespace -}}
+{{- end -}}
 {{- range .Values.rbac.extraNamespaces -}}{{- $namespaces = append $namespaces . -}}{{- end -}}
 {{- if .Values.leaderElect -}}{{- $namespaces = append $namespaces .Release.Namespace -}}{{- end -}}
 {{- $namespaces = $namespaces | uniq -}}

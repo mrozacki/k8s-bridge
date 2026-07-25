@@ -69,7 +69,7 @@ func main() {
 	// unrestricted path is an arbitrary-file read wired to an attacker-chosen
 	// sink. The default covers the canonical mount points the chart itself
 	// uses; widen it here (not in the CR) if you mount tokens elsewhere.
-	allowedTokenPaths := flag.String("allowed-token-paths", "/var/run/secrets/,/etc/k8s-bridge/", "comma-separated allowlist of directory prefixes a WorkloadMixing CR may read slurmTokenFile/slurmCACertFile from (supervisor mode); empty disables the check (not recommended)")
+	allowedTokenPaths := flag.String("allowed-token-paths", strings.Join(config.DefaultAllowedTokenPaths, ","), "comma-separated allowlist of directory prefixes a WorkloadMixing CR may read slurmTokenFile/slurmCACertFile from (supervisor mode); empty disables the check (not recommended)")
 	// allowInsecureTLS gates the CR's slurmInsecureSkipTLSVerify field (L8).
 	// Disabling certificate verification is a platform-admin decision; a CRD
 	// CEL rule cannot express it because the CR author is who sets the field.

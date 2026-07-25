@@ -47,7 +47,7 @@ against, so the control must live at deploy time, where the platform admin
 owns it.**
 
 1. **`--allowed-token-paths`** (chart: `allowedTokenPaths`, default
-   `/var/run/secrets/`, `/etc/k8s-bridge/`) bounds which directory prefixes a
+   `/var/run/secrets/slurm/`, `/etc/k8s-bridge/`) bounds which directory prefixes a
    CR may name in `slurmTokenFile` / `slurmCACertFile`.
 2. **`--allow-insecure-tls`** (chart: `allowInsecureTLS`, default `false`)
    must be set before a CR's `slurmInsecureSkipTLSVerify` is honored.
@@ -120,7 +120,7 @@ Regression tests pin both the refusal and the allowed path
 the two bypass classes (`TestValidateFilePathAllowed`).
 
 **Negative / breaking.** A supervisor-mode deployment whose CRs read tokens
-from a path outside `/var/run/secrets/` or `/etc/k8s-bridge/` will see those
+from a path outside `/var/run/secrets/slurm/` or `/etc/k8s-bridge/` will see those
 CRs refused with `Ready=False` / `InvalidSpec` after upgrading. This is
 intentional and visible (condition + event + log), not silent.
 
@@ -129,7 +129,7 @@ intentional and visible (condition + event + log), not silent.
 ```bash
 # widen to an extra mount point
 helm upgrade k8s-bridge deploy/chart/k8s-bridge --reuse-values \
-  --set 'allowedTokenPaths={/var/run/secrets/,/etc/k8s-bridge/,/srv/slurm/}'
+  --set 'allowedTokenPaths={/var/run/secrets/slurm/,/etc/k8s-bridge/,/srv/slurm/}'
 
 # or disable the check entirely (restores pre-ADR-0017 behavior; the
 # controller then logs a warning in supervisor mode)
@@ -146,3 +146,31 @@ ADR-0015 Phase B ships cluster-wide watching; at that point the path
 allowlist becomes the weaker of the two controls, because a cluster-wide
 supervisor adopts CRs from namespaces whose authors the platform admin may
 not know at all.
+
+## Postscript: the default shipped wrong, and how it was caught
+
+The first implementation of this ADR defaulted `allowedTokenPaths` to
+`/var/run/secrets/` — which **contains**
+`/var/run/secrets/kubernetes.io/serviceaccount/token`. The mechanism was
+correct and the ADR's reasoning was correct, but the shipped default admitted
+precisely the attack described above. The unit tests passed because they
+exercised a narrower list (`/var/run/secrets/slurm/`) than the one that
+shipped.
+
+It was caught by the installation-docs e2e (`test/e2e/run-installation-docs.sh`),
+which asserts the CHART's own default against the attack path statically (A5)
+and, live, applies a CR naming the ServiceAccount token and asserts it is
+refused (C1b). On first run C1b reported the CR **accepted and running
+healthy**.
+
+Two structural fixes, so this class cannot recur:
+
+- `config.DefaultAllowedTokenPaths` is now the single source of truth; the flag
+  default is built from it and `TestDefaultAllowedTokenPathsRefuseServiceAccountToken`
+  asserts its security property directly.
+- The e2e's static phase cross-checks the chart value against the same attack
+  path, so chart and code cannot drift apart silently.
+
+The general lesson, worth repeating in review: **a security test must exercise
+the configuration that ships, not a convenient one.** A test that constructs
+its own safe input proves the mechanism and says nothing about the product.
