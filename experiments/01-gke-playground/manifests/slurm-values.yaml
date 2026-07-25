@@ -124,7 +124,16 @@ configFiles:
   # verification, enabling SIMULATED GPUs (fake extended resource on the
   # K8s node) to exercise the full GRES chain without hardware.
   gres.conf: |
-    Name=gpu
+    # File= is REQUIRED, not decoration: on Slurm 26.05 a count-only
+    # "Name=gpu" makes slurmd verify the actual device count, report 0, and
+    # slurmctld then puts the freshly registered dynamic node into
+    # INVALID_REG + DRAIN with "gres/gpu count reported lower than configured
+    # (0 < 1)" — the job sits at ReqNodeNotAvail forever with no other clue.
+    # /dev/null is a real, always-present device file, which is what makes the
+    # SIMULATED GPU (fake nvidia.com/gpu extended resource on the K8s node)
+    # complete the whole GRES chain without hardware. Found live on GKE
+    # 2026-07-25; the count-only form was validated on an earlier Slurm.
+    Name=gpu File=/dev/null
   job_submit.lua: |
     local MIXING = { mixing = true, ["mixing-high"] = true, ["mixing-gpu"] = true }
 

@@ -226,27 +226,36 @@ the live pass above):
   new steps added this session (control-plane/ADR-0011, per-partition
   queues).
 
+**Validated live on GKE, 2026-07-25** (kube-prometheus-stack + Grafana 13.1,
+real Slurm/Kueue/bridge stack):
+
+- Grafana iframe embedding. The prediction above this section was exactly
+  right, and both settings it names are required: with Grafana's default
+  `X-Frame-Options: deny` the iframe is created correctly but renders
+  nothing, and `[security] allow_embedding = true` makes the dashboard
+  appear in the pane. `[auth.anonymous] enabled = true` was likewise needed
+  to view it without a login prompt inside the frame. For
+  kube-prometheus-stack:
+
+  ```bash
+  helm upgrade <release> prometheus-community/kube-prometheus-stack -n monitoring \
+    --reuse-values \
+    --set grafana.'grafana\.ini'.security.allow_embedding=true \
+    --set grafana.'grafana\.ini'.auth\.anonymous.enabled=true
+  ```
+
+- The status strip against a real stack: `GET /status` returned live
+  ClusterQueue/Workload/JobSet/squeue/sinfo data, and the CORS allowlist
+  reflected the console's own origin (`Vary: Origin`, no wildcard) while a
+  foreign origin got no CORS header at all.
+- The `?grafana=`/`?ttyd=` scheme validation: a `javascript:` URI was
+  refused with a console warning naming the rejected value, and no script
+  executed.
+
 **Still not validated (needs a real Slurm+Kueue+bridge stack — GKE, per
 `docs/adr/0003-gke-first-playground.md`'s reasoning that Slinky's
 dynamic-node registration needs a real cluster network, not `kind`):**
 
-- The status strip rendering real ClusterQueue/Workload/JobSet/squeue/sinfo
-  data — this session's `kind` cluster had none of those installed (no
-  Slurm, no Kueue, no bridge), so only the "genuinely absent" path was
-  exercised for those fields, not the "present with real data" path. A
-  bare `kind` cluster cannot close this gap either (see the "Runs on GKE,
-  not kind" note at the top of `experiments/DEMO.md`) — this needs the
-  next live GKE session.
-- Grafana iframe embedding against a real Grafana instance — in
-  particular, Grafana's default `X-Frame-Options`/CSP headers **block**
-  iframe embedding unless the Grafana server's config explicitly sets
-  `allow_embedding = true` under `[security]` (`grafana.ini`) and, for
-  anonymous/no-login viewing in an iframe, typically
-  `[auth.anonymous] enabled = true`. This is a known constraint, not a bug
-  in this tool — if the Grafana panel appears blank, check those two
-  settings on the Grafana server first (documented in the dashboard-mode
-  header text in the UI, and worth calling out during a demo dry run
-  before relying on it live).
 - The presenter's actual OS/browser combination for the live event (this
   session validated Chrome on macOS via automation; a manual dry run on
   the actual presenting machine is still worthwhile before a real demo).

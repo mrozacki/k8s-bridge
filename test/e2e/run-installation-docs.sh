@@ -76,6 +76,37 @@ PHASE="${PHASE:-all}" # static | all
 CLUSTER_NAME="${CLUSTER_NAME:-k8s-bridge-docs-e2e}"
 IMAGE_TAG="${IMAGE_TAG:-k8s-bridge:docs-e2e}"
 
+# CLUSTER_MODE picks where phases B/C run:
+#   kind     (default) — create a throwaway kind cluster, load the image into it
+#                        and delete the cluster on exit. Self-contained; what CI
+#                        and a laptop run use.
+#   existing           — run against whatever cluster kubectl currently points
+#                        at, with IMAGE_TAG a ref that cluster can already pull
+#                        (push it first). Used to validate the guide on a real
+#                        cloud cluster, where `kind load` has no meaning and a
+#                        real scheduler, CNI, RBAC and PodSecurity actually
+#                        apply — several of this project's live findings were
+#                        only reachable there.
+#
+# In existing mode the script NEVER deletes the cluster; it removes only the
+# namespaces it created. Deleting someone's real cluster because a test script
+# exited is not a failure mode worth having.
+CLUSTER_MODE="${CLUSTER_MODE:-kind}"
+case "${CLUSTER_MODE}" in
+kind | existing) ;;
+*)
+  echo "CLUSTER_MODE must be 'kind' or 'existing', got '${CLUSTER_MODE}'" >&2
+  exit 2
+  ;;
+esac
+
+# kind pre-loads the image into the node, so Never is correct AND is a useful
+# assertion there: it proves the chart runs the image we just built rather than
+# silently pulling something else. On a real cluster the image has to be pulled,
+# so Never would put every Deployment straight into ErrImageNeverPull.
+PULL_POLICY="Never"
+[ "${CLUSTER_MODE}" = "existing" ] && PULL_POLICY="IfNotPresent"
+
 # One namespace per documented install shape so a leftover Ready controller
 # from an earlier shape can never mask a later one's failure (the same
 # reasoning run.sh gives for splitting its two phases).
@@ -108,11 +139,23 @@ WORKDIR="$(mktemp -d)"
 
 cleanup() {
   if [ "${PHASE}" != "static" ]; then
-    if [ "${KEEP_CLUSTER}" != "true" ]; then
+    if [ "${KEEP_CLUSTER}" = "true" ]; then
+      log "KEEP_CLUSTER=true: leaving everything up for inspection"
+    elif [ "${CLUSTER_MODE}" = "kind" ]; then
       log "tearing down kind cluster ${CLUSTER_NAME}"
       kind delete cluster --name "${CLUSTER_NAME}" >/dev/null 2>&1 || true
     else
-      log "KEEP_CLUSTER=true: leaving cluster ${CLUSTER_NAME} up for inspection"
+      # existing cluster: remove only what this script created. The Kueue queue
+      # objects from §2 are cluster-scoped (ResourceFlavor, ClusterQueue) so
+      # they are named explicitly; everything else lives in these namespaces.
+      log "existing cluster: removing only the namespaces/objects this run created"
+      kubectl delete namespace "${NS_FILE}" "${NS_SUP}" "${NS_BIND}" "${NS_SLURM}" \
+        --ignore-not-found --wait=false >/dev/null 2>&1 || true
+      # Only the cluster-scoped objects THIS run created (see B0).
+      [ "${CREATED_CLUSTER_QUEUE:-false}" = "true" ] &&
+        kubectl delete clusterqueue main-queue --ignore-not-found >/dev/null 2>&1 || true
+      [ "${CREATED_RESOURCE_FLAVOR:-false}" = "true" ] &&
+        kubectl delete resourceflavor default-flavor --ignore-not-found >/dev/null 2>&1 || true
     fi
   fi
   rm -rf "${WORKDIR}"
@@ -492,7 +535,9 @@ fi
 # =============================================================================
 # PHASE B — LIVE VALIDATION ON KIND
 # =============================================================================
-for bin in kind docker kubectl; do
+REQUIRED_BINS="kubectl"
+[ "${CLUSTER_MODE}" = "kind" ] && REQUIRED_BINS="kind docker kubectl"
+for bin in ${REQUIRED_BINS}; do
   command -v "$bin" >/dev/null 2>&1 || { echo "missing required tool: $bin" >&2; exit 1; }
 done
 
@@ -507,19 +552,54 @@ KUEUE_URL=$(grep -o 'https://github.com/kubernetes-sigs/kueue/releases/download/
 
 log "PHASE B: live validation on kind (JobSet from ${JOBSET_URL##*/download/}, Kueue from ${KUEUE_URL##*/download/} — both read from ${DOC#"${REPO_ROOT}"/})"
 
-log "creating kind cluster ${CLUSTER_NAME}"
-kind create cluster --name "${CLUSTER_NAME}" --wait 120s
+if [ "${CLUSTER_MODE}" = "kind" ]; then
+  log "creating kind cluster ${CLUSTER_NAME}"
+  kind create cluster --name "${CLUSTER_NAME}" --wait 120s
+else
+  CURRENT_CTX=$(kubectl config current-context)
+  log "existing cluster mode: using kubectl context ${CURRENT_CTX} (no cluster will be created or deleted)"
+  kubectl get nodes -o wide | sed 's/^/    /'
+fi
 
-log "installing JobSet (docs/installation.md §1.3)"
-kubectl apply --server-side -f "${JOBSET_URL}"
+# In existing-cluster mode the prerequisites may already be installed AND
+# locally adjusted — this project's own GKE playground, for instance, raises
+# Kueue's memory limit with `kubectl set resources` after installing it. Blindly
+# re-applying the guide's manifest then fails with a server-side-apply field
+# conflict ("conflict with kubectl-set"), which says nothing about the guide and
+# everything about the cluster already being in use. So: install a prerequisite
+# only when it is genuinely absent, and say clearly when one is skipped.
+install_prereq() {
+  local what="$1" url="$2" probe_kind="$3" probe_name="$4"
+  if [ "${CLUSTER_MODE}" = "existing" ] && kubectl get "${probe_kind}" "${probe_name}" >/dev/null 2>&1; then
+    log "skipping ${what}: already present on this cluster (${probe_kind}/${probe_name}) — existing-cluster mode does not reinstall prerequisites"
+    return 0
+  fi
+  log "installing ${what}"
+  kubectl apply --server-side -f "${url}"
+}
 
-log "installing Kueue (docs/installation.md §1.4)"
-kubectl apply --server-side -f "${KUEUE_URL}"
+install_prereq "JobSet (docs/installation.md §1.3)" "${JOBSET_URL}" crd jobsets.jobset.x-k8s.io
+install_prereq "Kueue (docs/installation.md §1.4)" "${KUEUE_URL}" crd clusterqueues.kueue.x-k8s.io
 kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=300s
 
-log "building bridge image ${IMAGE_TAG}"
-docker build -t "${IMAGE_TAG}" .
-kind load docker-image "${IMAGE_TAG}" --name "${CLUSTER_NAME}"
+if [ "${CLUSTER_MODE}" = "kind" ]; then
+  log "building bridge image ${IMAGE_TAG}"
+  docker build -t "${IMAGE_TAG}" .
+  kind load docker-image "${IMAGE_TAG}" --name "${CLUSTER_NAME}"
+else
+  # On a real cluster the image must already be pullable — build+push is the
+  # caller's job, because only they know the registry and its credentials.
+  # Fail loudly here rather than let every Deployment sit in ImagePullBackOff
+  # and time out one assertion at a time.
+  log "existing cluster mode: expecting ${IMAGE_TAG} to be pullable by the cluster (not building or loading it here)"
+  case "${IMAGE_TAG}" in
+  *"/"*) ;;
+  *)
+    echo "IMAGE_TAG=${IMAGE_TAG} has no registry component; a real cluster cannot pull it. Push the image and pass IMAGE_TAG=<registry>/<repo>:<tag>." >&2
+    exit 2
+    ;;
+  esac
+fi
 
 # --- §2 queue objects, applied verbatim from the guide -----------------------
 # The whole YAML block under "## 2. Kueue queue objects" is extracted and
@@ -535,6 +615,23 @@ if [ ! -s "${WORKDIR}/kueue-objects.yaml" ]; then
   fail "B0: could not extract the §2 Kueue queue-object manifest from ${DOC#"${REPO_ROOT}"/}"
 else
   log "applying the guide's §2 queue objects (ResourceFlavor/ClusterQueue/LocalQueue/WorkloadPriorityClass)"
+  # Cluster-scoped objects are shared state. On a real cluster the guide's own
+  # names (main-queue, default-flavor) may already belong to somebody else —
+  # this project's own GKE playground creates a `main-queue` for the tutorial —
+  # so record which ones we actually create and let cleanup remove only those.
+  # Deleting a ClusterQueue we merely found would take the tutorial's queues out
+  # from under it.
+  CREATED_CLUSTER_QUEUE=false
+  CREATED_RESOURCE_FLAVOR=false
+  if [ "${CLUSTER_MODE}" = "existing" ]; then
+    kubectl get clusterqueue main-queue >/dev/null 2>&1 || CREATED_CLUSTER_QUEUE=true
+    kubectl get resourceflavor default-flavor >/dev/null 2>&1 || CREATED_RESOURCE_FLAVOR=true
+    [ "${CREATED_CLUSTER_QUEUE}" = "false" ] &&
+      log "note: ClusterQueue/main-queue already exists — reusing it and leaving it in place on cleanup"
+  else
+    CREATED_CLUSTER_QUEUE=true
+    CREATED_RESOURCE_FLAVOR=true
+  fi
   # Kueue's webhooks can be briefly unavailable right after rollout; retry a
   # bounded number of times rather than failing the whole run on a race.
   applied=false
@@ -769,7 +866,7 @@ helm install "${RELEASE}" "${CHART_DIR}" \
   --namespace "${NS_FILE}" --create-namespace \
   --set image.repository="${IMAGE_TAG%%:*}" \
   --set image.tag="${IMAGE_TAG##*:}" \
-  --set image.pullPolicy=Never \
+  --set image.pullPolicy="${PULL_POLICY}" \
   --set config.namespace="${NS_FILE}" \
   --set config.localQueue=main \
   --set config.slurmRestURL="$(mock_url "${NS_FILE}")" \
@@ -815,7 +912,7 @@ helm install "${RELEASE}" "${CHART_DIR}" \
   --namespace "${NS_SUP}" --create-namespace \
   --set image.repository="${IMAGE_TAG%%:*}" \
   --set image.tag="${IMAGE_TAG##*:}" \
-  --set image.pullPolicy=Never \
+  --set image.pullPolicy="${PULL_POLICY}" \
   --set configSource=cr \
   --wait --timeout=300s
 
@@ -882,7 +979,7 @@ b3_out=$(helm install "${RELEASE}" "${CHART_DIR}" \
   --namespace "${NS_BIND}" --create-namespace \
   --set image.repository="${IMAGE_TAG%%:*}" \
   --set image.tag="${IMAGE_TAG##*:}" \
-  --set image.pullPolicy=Never \
+  --set image.pullPolicy="${PULL_POLICY}" \
   --set configSource=cr \
   --set workloadmixing.namespace="${NS_BIND}" \
   --set workloadmixing.name=playground \
@@ -896,7 +993,7 @@ if [ "${b3_rc}" -ne 0 ]; then
     --namespace "${NS_BIND}" --create-namespace \
     --set image.repository="${IMAGE_TAG%%:*}" \
     --set image.tag="${IMAGE_TAG##*:}" \
-    --set image.pullPolicy=Never \
+    --set image.pullPolicy="${PULL_POLICY}" \
     --set configSource=cr \
     --set config.namespace="${NS_BIND}" \
     --set workloadmixing.namespace="${NS_BIND}" \

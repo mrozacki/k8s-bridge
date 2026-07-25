@@ -391,10 +391,37 @@ needing real GPU hardware.
 # memory: pods sized to --mem-per-cpu, node advertises RealMemory to match
 sbatch --partition=mixing --ntasks=1 --mem-per-cpu=2G --wrap='sleep 20'
 
-# GPU simulation (no hardware, full chain): fake extended resource + count-only gres
-kubectl patch node <NODE> --subresource=status --type=merge -p '{"status":{"capacity":{"nvidia.com/gpu":"2"},"allocatable":{"nvidia.com/gpu":"2"}}}'
-kubectl create configmap wm-gres-conf -n slurm-jobs --from-literal=gres.conf="Name=gpu File=/dev/null"
-# add nvidia.com/gpu quota to the ClusterQueue, then:
+# GPU simulation (no hardware, full chain). THREE prerequisites, all required —
+# skipping any one leaves the job pending forever with a misleading reason.
+#
+# 1. fake the extended resource on EVERY node you want to be eligible. Kueue's
+#    topology-aware scheduling is all-or-nothing per workload, so a single
+#    faked node is usually not enough once the rest of the stack is running.
+for N in $(kubectl get nodes -o name | cut -d/ -f2); do
+  kubectl patch node "$N" --subresource=status --type=merge \
+    -p '{"status":{"capacity":{"nvidia.com/gpu":"2"},"allocatable":{"nvidia.com/gpu":"2"}}}'
+done
+
+# 2. give the ClusterQueue nvidia.com/gpu quota — without it Kueue reports
+#    "resource nvidia.com/gpu unavailable in ClusterQueue" and never admits.
+#    (Adjust the queue name to the one your CR's localQueue points at.)
+kubectl get clusterqueue team-a -o json \
+  | jq '.spec.resourceGroups[0].coveredResources += ["nvidia.com/gpu"]
+        | .spec.resourceGroups[0].flavors[].resources += [{"name":"nvidia.com/gpu","nominalQuota":"2"}]' \
+  | kubectl apply -f -
+
+# 3. the SLURM CLUSTER's gres.conf needs a device-file entry. On Slurm 26.05 a
+#    count-only "Name=gpu" is NOT enough: slurmd verifies the actual device
+#    count, reports 0, and slurmctld puts the freshly registered dynamic node
+#    into INVALID_REG + DRAIN with "gres/gpu count reported lower than
+#    configured (0 < 1)". The job then sits at ReqNodeNotAvail forever. Set
+#    this in the Slurm chart's configFiles (see
+#    experiments/01-gke-playground/manifests/slurm-values.yaml) — NOT in a
+#    bridge-side ConfigMap: the bridge deliberately no longer mounts one
+#    (see the NOTE in internal/translate/translate.go).
+#      gres.conf: |
+#        Name=gpu File=/dev/null
+
 sbatch --partition=mixing --gres=gpu:1 --wrap='srun echo GPU job'
 sinfo -N -o "%N %G"     # dynamic node advertises gpu:1
 
@@ -477,6 +504,16 @@ Further reading: [`docs/architecture.md`](architecture.md) section 4b.
 Two teams can share a quota pool. Idle capacity gets lent out
 automatically, and reclaimed the moment the owning team actually needs
 it — and this composes with topology-aware scheduling too.
+
+> **This section needs a 4th node.** The filler is a 4-pod gang at 2 CPU each
+> (`parallelism: 4`, `requests.cpu: "2"`), Kueue's topology-aware scheduling
+> admits a workload all-or-nothing, and an `e2-standard-4` has room for exactly
+> one such pod once the shared stack is running. On the 3-node cluster section 1
+> pins, Kueue reports `topology "simulated-dc" allows to fit only 2 out of 4
+> pod(s)` and the filler never borrows. Either bring up a 4th node for this
+> section (`gcloud container clusters resize k8s-bridge-playground --num-nodes=4
+> --zone <zone>`) or shrink the filler's `parallelism` to match the room you
+> have. Verified live 2026-07-25.
 
 ```bash
 kubectl create -f ../experiments/06-multitenant/manifests/teamb-filler-job.yaml
