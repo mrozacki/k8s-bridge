@@ -432,6 +432,73 @@ func TestSupervisorImageAllowlist(t *testing.T) {
 	}
 }
 
+// TestSupervisorTokenPathAllowlist: the deploy-time token-path trust anchor
+// (H2) applies per CR in supervisor mode. The CR author picks both the file
+// the controller reads and the URL its contents are sent to, so a path
+// outside the allowlist must refuse THAT CR (Ready=False/InvalidSpec) rather
+// than let the controller read, say, its own ServiceAccount token and post it
+// to an endpoint the same CR names.
+func TestSupervisorTokenPathAllowlist(t *testing.T) {
+	spec := specWith("https://a:6820", "mixing")
+	spec.SlurmTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	wm := newWorkloadMixing("wm", "slurm-jobs", spec)
+	wm.Generation = 1
+	s := startedSupervisor(t, wm)
+	s.AllowedTokenPaths = []string{"/var/run/secrets/slurm/", "/etc/k8s-bridge/"}
+
+	mustReconcile(t, s, "wm")
+	if _, running := s.get(types.NamespacedName{Namespace: "slurm-jobs", Name: "wm"}); running {
+		t.Fatal("bridge started despite slurmTokenFile outside the allowlist")
+	}
+	cond := readyCondition(t, s, "wm")
+	if cond == nil || cond.Reason != ReasonInvalidSpec || !strings.Contains(cond.Message, "allowed-token-paths") {
+		t.Fatalf("Ready condition = %+v, want InvalidSpec naming the token-path allowlist", cond)
+	}
+
+	// An allowed path under the same anchor starts normally — the check must
+	// gate the escape, not the feature.
+	spec.SlurmTokenFile = "/var/run/secrets/slurm/token"
+	ok := newWorkloadMixing("ok", "slurm-jobs", spec)
+	ok.Generation = 1
+	s2 := startedSupervisor(t, ok)
+	s2.AllowedTokenPaths = []string{"/var/run/secrets/slurm/", "/etc/k8s-bridge/"}
+	mustReconcile(t, s2, "ok")
+	if _, running := s2.get(types.NamespacedName{Namespace: "slurm-jobs", Name: "ok"}); !running {
+		t.Fatalf("bridge did not start for an allowed token path; Ready = %+v", readyCondition(t, s2, "ok"))
+	}
+}
+
+// TestSupervisorInsecureTLSGate: slurmInsecureSkipTLSVerify (L8) is a
+// platform-admin decision. A CR asking to skip certificate verification is
+// refused unless the controller was started with --allow-insecure-tls; with
+// the flag on, the same CR runs (the gate must not break the dev escape hatch,
+// only move the acknowledgement to whoever deploys the controller).
+func TestSupervisorInsecureTLSGate(t *testing.T) {
+	spec := specWith("https://a:6820", "mixing")
+	spec.SlurmInsecureSkipTLSVerify = true
+	wm := newWorkloadMixing("wm", "slurm-jobs", spec)
+	wm.Generation = 1
+	s := startedSupervisor(t, wm)
+
+	mustReconcile(t, s, "wm")
+	if _, running := s.get(types.NamespacedName{Namespace: "slurm-jobs", Name: "wm"}); running {
+		t.Fatal("bridge started despite slurmInsecureSkipTLSVerify without --allow-insecure-tls")
+	}
+	cond := readyCondition(t, s, "wm")
+	if cond == nil || cond.Reason != ReasonInvalidSpec || !strings.Contains(cond.Message, "allow-insecure-tls") {
+		t.Fatalf("Ready condition = %+v, want InvalidSpec naming the flag", cond)
+	}
+
+	ok := newWorkloadMixing("ok", "slurm-jobs", spec)
+	ok.Generation = 1
+	s2 := startedSupervisor(t, ok)
+	s2.AllowInsecureTLS = true
+	mustReconcile(t, s2, "ok")
+	if _, running := s2.get(types.NamespacedName{Namespace: "slurm-jobs", Name: "ok"}); !running {
+		t.Fatalf("bridge did not start with --allow-insecure-tls; Ready = %+v", readyCondition(t, s2, "ok"))
+	}
+}
+
 // TestSupervisorStartFailedRetries: a slurm-client construction failure
 // (typically the token Secret not mounted yet) reports StartFailed and
 // retries on the timer; once the factory heals, the bridge starts.

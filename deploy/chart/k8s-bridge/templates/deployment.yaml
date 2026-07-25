@@ -124,6 +124,13 @@ spec:
             - "--allowed-slurmd-images"
             - {{ join "," . | quote }}
             {{- end }}
+            {{- with .Values.allowedTokenPaths }}
+            - "--allowed-token-paths"
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.allowInsecureTLS }}
+            - "--allow-insecure-tls"
+            {{- end }}
             # ADR-0011: leader election via a coordination.k8s.io Lease so a
             # second replica sits idle instead of double-processing. The
             # flag defaults to true in the binary too; passing it explicitly

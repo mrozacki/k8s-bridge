@@ -52,6 +52,15 @@
         "type": "string"
       }
     },
+    "allowedTokenPaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowInsecureTLS": {
+      "type": "boolean"
+    },
     "resources": {
       "type": "object"
     },

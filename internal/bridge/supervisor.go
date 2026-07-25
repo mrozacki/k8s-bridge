@@ -186,6 +186,25 @@ type Supervisor struct {
 	// C1) checked against every CR's slurmd image before its Bridge starts.
 	// Empty allows any image (main.go already warns loudly about that).
 	AllowedSlurmdImages []string
+	// AllowInsecureTLS gates the CR's slurmInsecureSkipTLSVerify escape hatch
+	// (security audit L8). Without it a CR author could silently turn off
+	// slurmrestd certificate verification for their own loop — the CRD's CEL
+	// rule cannot help here, since the CR author is the one setting the field.
+	// So the acknowledgement moves to deploy time, where the platform admin
+	// owns it, mirroring AllowedSlurmdImages/AllowedTokenPaths. Default false:
+	// a CR asking to skip verification is refused unless the operator opted in.
+	AllowInsecureTLS bool
+	// AllowedTokenPaths is the deploy-time trust anchor (security audit H2)
+	// for the two CR fields that name files on the CONTROLLER's filesystem:
+	// slurmTokenFile and slurmCACertFile. Supervisor mode adopts every CR in
+	// the namespace, so without this a CR author could point slurmTokenFile
+	// at the controller's own ServiceAccount token and slurmRestURL at an
+	// endpoint they control, exfiltrating it in the auth header. Enforced
+	// here and NOT in single-CR/file mode, because there the config comes
+	// from a source the platform admin chose explicitly — the CR is only
+	// untrusted input when it is picked up automatically. Empty disables the
+	// check (main.go warns).
+	AllowedTokenPaths []string
 	// ConflictRetryInterval overrides defaultConflictRetryInterval when >0
 	// (shrunk by tests; envtest waits on the real requeue path).
 	ConflictRetryInterval time.Duration
@@ -328,8 +347,9 @@ func (s *Supervisor) Reconcile(ctx context.Context, req reconcile.Request) (reco
 // buildConfig converts and vets the CR exactly like every other config path:
 // FromCR (which runs the shared ApplyDefaults + Validate), then the
 // deploy-time slurmd image allowlist (C1 — a per-CR check here, where
-// single-CR mode checks it once at startup), then the supervisor-only
-// ownership scoping field.
+// single-CR mode checks it once at startup), then the deploy-time token-path
+// allowlist (H2 — supervisor-only by design, see AllowedTokenPaths), then the
+// supervisor-only ownership scoping field.
 func (s *Supervisor) buildConfig(wm *v1alpha1.WorkloadMixing) (*config.Config, error) {
 	cfg, err := FromCR(wm)
 	if err != nil {
@@ -339,6 +359,29 @@ func (s *Supervisor) buildConfig(wm *v1alpha1.WorkloadMixing) (*config.Config, e
 		if err := config.ValidateImageAllowed(cfg.Slurmd.Image, s.AllowedSlurmdImages); err != nil {
 			return nil, fmt.Errorf("slurmd image rejected by --allowed-slurmd-images: %w", err)
 		}
+	}
+	// H2: both CR fields that name a file on the controller's own filesystem.
+	// Both are optional in the API, and an unset field reads no file at all —
+	// nothing to exfiltrate — so only a path the controller would actually
+	// open is vetted. That keeps this check strictly additive: it can reject
+	// only configs that were going to read something.
+	if len(s.AllowedTokenPaths) > 0 {
+		for _, f := range []struct{ field, path string }{
+			{"slurmTokenFile", cfg.SlurmTokenFile},
+			{"slurmCACertFile", cfg.SlurmCACertFile},
+		} {
+			if f.path == "" {
+				continue
+			}
+			if err := config.ValidateFilePathAllowed(f.field, f.path, s.AllowedTokenPaths); err != nil {
+				return nil, fmt.Errorf("rejected by --allowed-token-paths: %w", err)
+			}
+		}
+	}
+	// L8: turning off TLS verification is a platform-admin decision, not a
+	// CR-author one (see AllowInsecureTLS).
+	if cfg.SlurmInsecureSkipTLSVerify && !s.AllowInsecureTLS {
+		return nil, fmt.Errorf("slurmInsecureSkipTLSVerify is refused: the controller was not started with --allow-insecure-tls")
 	}
 	// Per-CR JobSet ownership (see WorkloadMixingName's doc): every Bridge
 	// this supervisor starts stamps and selects its own CR's name.

@@ -61,6 +61,19 @@ func main() {
 	// it must NOT come from the WorkloadMixing CR, whose author is exactly who
 	// the allowlist defends against. Empty allows any image (with a warning).
 	allowedImages := flag.String("allowed-slurmd-images", "", "comma-separated allowlist of permitted slurmd image prefixes; empty allows any (not recommended)")
+	// allowedTokenPaths restricts which files a WorkloadMixing CR may name in
+	// slurmTokenFile/slurmCACertFile (H2 in the 2026-07-24 audit). Same trust
+	// anchor reasoning as allowedSlurmdImages: the controller reads these paths
+	// from its own filesystem and sends the token to a URL the same CR chooses,
+	// so in supervisor mode — where every CR in the namespace is adopted — an
+	// unrestricted path is an arbitrary-file read wired to an attacker-chosen
+	// sink. The default covers the canonical mount points the chart itself
+	// uses; widen it here (not in the CR) if you mount tokens elsewhere.
+	allowedTokenPaths := flag.String("allowed-token-paths", "/var/run/secrets/,/etc/k8s-bridge/", "comma-separated allowlist of directory prefixes a WorkloadMixing CR may read slurmTokenFile/slurmCACertFile from (supervisor mode); empty disables the check (not recommended)")
+	// allowInsecureTLS gates the CR's slurmInsecureSkipTLSVerify field (L8).
+	// Disabling certificate verification is a platform-admin decision; a CRD
+	// CEL rule cannot express it because the CR author is who sets the field.
+	allowInsecureTLS := flag.Bool("allow-insecure-tls", false, "permit a WorkloadMixing CR to set slurmInsecureSkipTLSVerify (supervisor mode); development only")
 	// metricsAddr consolidates the HTTP surface (audit AUD2): a single mux
 	// serves /metrics, /healthz and /readyz on one port. This replaces the
 	// former separate --health-addr flag; the Helm chart already wires its
@@ -283,6 +296,15 @@ func main() {
 		}
 	}
 
+	// H2: the token-path allowlist is enforced per CR by the Supervisor, for
+	// the reason spelled out on Supervisor.AllowedTokenPaths — a CR is only
+	// untrusted input when it is adopted automatically. In single-CR/file mode
+	// the admin named the config source, so there is nothing to gate here.
+	tokenPathAllowlist := splitAndTrim(*allowedTokenPaths)
+	if len(tokenPathAllowlist) == 0 && mode == modeSupervisor {
+		log.Warn("no --allowed-token-paths set: any WorkloadMixing CR in this namespace may make the controller read an arbitrary file it has access to and send it to the CR's slurmRestURL; set an allowlist in production")
+	}
+
 	// The consolidated mux's probe handlers: the single Bridge's own
 	// handlers in single-CR/file mode (byte-compatible with every previous
 	// release), the Supervisor's aggregating handlers in supervisor mode.
@@ -319,6 +341,8 @@ func main() {
 			},
 			Recorder:            mgr.GetEventRecorderFor("k8s-bridge"), //nolint:staticcheck // classic record.EventRecorder API; migration is separate
 			AllowedSlurmdImages: allowlist,
+			AllowedTokenPaths:   tokenPathAllowlist,
+			AllowInsecureTLS:    *allowInsecureTLS,
 		}
 		// The Supervisor is both the WorkloadMixing reconciler (this watch)
 		// and a Runnable (below; captures the leader-elected context its

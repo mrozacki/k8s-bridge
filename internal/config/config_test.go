@@ -276,6 +276,59 @@ func TestValidateImageAllowed(t *testing.T) {
 	}
 }
 
+// TestValidateFilePathAllowed pins the H2 token-path allowlist, including the
+// two bypasses a naive strings.HasPrefix check would let through: a traversal
+// segment hidden inside an allowed prefix, and a sibling directory that merely
+// shares the prefix as a string.
+func TestValidateFilePathAllowed(t *testing.T) {
+	allow := []string{"/var/run/secrets/", "/etc/k8s-bridge/"}
+
+	allowed := []string{
+		"/var/run/secrets/slurm/token",
+		"/etc/k8s-bridge/ca.crt",
+		"/var/run/secrets/token",
+	}
+	for _, p := range allowed {
+		if err := ValidateFilePathAllowed("slurmTokenFile", p, allow); err != nil {
+			t.Errorf("path %q inside the allowlist should pass: %v", p, err)
+		}
+	}
+
+	rejected := map[string]string{
+		"/var/run/secrets/../../var/lib/kubelet/token": "traversal escaping an allowed prefix",
+		"/var/run/secretsomething/token":               "sibling directory sharing the prefix string",
+		"/var/run/secrets-evil/token":                  "sibling directory sharing the prefix string",
+		"/proc/self/environ":                           "path outside every allowed prefix",
+		"/var/run/secrets/../token":                    "traversal landing just above an allowed prefix",
+		"relative/token":                               "relative path (resolves against an unstable cwd)",
+		"":                                             "empty path",
+	}
+	for p, why := range rejected {
+		if err := ValidateFilePathAllowed("slurmTokenFile", p, allow); err == nil {
+			t.Errorf("path %q must be rejected (%s)", p, why)
+		}
+	}
+
+	// A prefix given without its trailing separator must behave identically —
+	// operators should not have to remember which form the flag wants — but it
+	// still must not match a sibling that merely shares the string.
+	noSlash := []string{"/var/run/secrets"}
+	if err := ValidateFilePathAllowed("slurmTokenFile", "/var/run/secrets/slurm/token", noSlash); err != nil {
+		t.Errorf("prefix without a trailing separator should still match beneath it: %v", err)
+	}
+	if err := ValidateFilePathAllowed("slurmTokenFile", "/var/run/secretsomething/token", noSlash); err == nil {
+		t.Error("prefix without a trailing separator must not match a sibling sharing the string")
+	}
+	// The prefix itself naming a file exactly (an operator pinning one path).
+	exact := []string{"/etc/k8s-bridge/token"}
+	if err := ValidateFilePathAllowed("slurmTokenFile", "/etc/k8s-bridge/token", exact); err != nil {
+		t.Errorf("exact match should pass: %v", err)
+	}
+	if err := ValidateFilePathAllowed("slurmTokenFile", "/etc/k8s-bridge/token-other", exact); err == nil {
+		t.Error("exact-pin prefix must not match a longer sibling name")
+	}
+}
+
 func TestPrivilegedDefaultsTrue(t *testing.T) {
 	cfg, err := Load(writeConfig(t, validConfig))
 	if err != nil {

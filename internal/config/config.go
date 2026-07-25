@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -386,6 +387,46 @@ func ValidateImageAllowed(image string, allowed []string) error {
 		}
 	}
 	return fmt.Errorf("slurmd image %q is not in the allowlist %v", image, allowed)
+}
+
+// ValidateFilePathAllowed reports whether a CR-supplied file path is inside one
+// of the allowed directory prefixes (security audit H2).
+//
+// Why this exists: the controller reads slurmTokenFile and slurmCACertFile from
+// its OWN filesystem and sends the token's contents to slurmRestURL as the
+// X-SLURM-USER-TOKEN header. In supervisor mode (ADR-0015) every WorkloadMixing
+// CR in the namespace is adopted, so an unrestricted path would let a CR author
+// name any file the controller process can read — including its own
+// ServiceAccount token — and a slurmRestURL they control to receive it. Both
+// fields are therefore vetted against a deploy-time allowlist, exactly like the
+// slurmd image (C1): a trust anchor the CR author cannot widen.
+//
+// Two hardening details that a naive prefix check would get wrong:
+//
+//  1. The path is Clean()ed BEFORE matching, so "/var/run/secrets/../../etc/
+//     shadow" cannot slip through by carrying its escape inside an allowed
+//     prefix. A relative path is rejected outright — it would resolve against
+//     the controller's working directory, which is not a stable trust base.
+//  2. Matching is at a path BOUNDARY, not a raw string prefix. Allowing
+//     "/var/run/secrets" must not also allow "/var/run/secretsomething-else";
+//     the candidate has to be the prefix itself or live beneath it. Prefixes
+//     are accepted with or without a trailing separator so operators do not
+//     have to remember which form the flag wants.
+func ValidateFilePathAllowed(field, path string, allowed []string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s %q must be an absolute path (allowlist %v)", field, path, allowed)
+	}
+	clean := filepath.Clean(path)
+	for _, prefix := range allowed {
+		if prefix == "" {
+			continue
+		}
+		cleanPrefix := filepath.Clean(prefix)
+		if clean == cleanPrefix || strings.HasPrefix(clean, cleanPrefix+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s %q is not under any allowed path prefix %v", field, clean, allowed)
 }
 
 func Load(path string) (*Config, error) {

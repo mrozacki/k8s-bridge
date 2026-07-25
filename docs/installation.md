@@ -283,6 +283,11 @@ Rules worth knowing in supervisor mode:
 - **Scope**: the watch covers the release namespace only (`POD_NAMESPACE`),
   preserving the chart's namespaced-RBAC secure default. Cluster-wide watch
   is ADR-0015 Phase B and is not shipped.
+- **Token/CA paths**: `slurmTokenFile` and `slurmCACertFile` must resolve
+  under one of the chart's `allowedTokenPaths` prefixes (default
+  `/var/run/secrets/`, `/etc/k8s-bridge/`) — a deploy-time trust anchor the
+  CR itself cannot loosen (ADR-0017). The shipped
+  `workloadmixing-sample.yaml` already satisfies it.
 - **Migration from single-CR mode**: JobSets created before the switch lack
   the per-CR ownership label (`k8s-bridge.x-k8s.io/workloadmixing`) and are
   invisible to supervisor-mode loops — they will not be cleaned up. Drain
@@ -308,11 +313,13 @@ From `internal/config/config.go` / `deploy/chart/k8s-bridge/values.yaml`:
 
 | Field | Notes |
 |---|---|
-| `config.slurmRestURL` | Must be `https://` unless `config.allowInsecureHTTP: true` — the JWT is bearer-equivalent. |
+| `config.slurmRestURL` | Chart default is `https://`; plaintext requires the explicit opt-in `config.allowInsecureHTTP: true` — the JWT is bearer-equivalent. |
 | `config.slurmUser` | Leave empty (default) unless you provisioned a dedicated low-privilege Slurm REST user; an unknown user 422s every job update. |
 | `config.namespace` / `config.localQueue` | Must match a namespace/LocalQueue created in step 2. |
 | `config.partitionMappings` | At least one entry required; maps a Slurm partition to a `WorkloadPriorityClass`, optionally overriding `localQueue` per partition (multi-team). |
 | `config.slurmd.image` | Must match an `allowedSlurmdImages` prefix (chart value, controller-level trust anchor — deliberately not settable via the CR). |
+| `allowedTokenPaths` | Directory prefixes a `WorkloadMixing` CR's `slurmTokenFile` / `slurmCACertFile` may resolve under in supervisor mode (chart value, controller-level trust anchor — deliberately not settable via the CR). Default `/var/run/secrets/`, `/etc/k8s-bridge/` (ADR-0017). |
+| `allowInsecureTLS` | Must be `true` before a CR's `slurmInsecureSkipTLSVerify` is honored in supervisor mode (chart value, controller-level trust anchor — deliberately not settable via the CR). Default `false` (ADR-0017). |
 | `config.slurmRequestTimeout` | Per-request slurmrestd HTTP timeout, default 30s, bounded 1s–10m; raise for large backlogs (`GET /jobs` has no server-side paging in slurmrestd v0.0.44). |
 | `config.slurmRequestsPerSecond` | Client-side token-bucket rate limit toward slurmrestd itself (distinct from `kubeClient.qps/burst`, which limits calls to kube-apiserver). `0` (default) is unlimited; valid range is `[0, 10000]`. Burst is derived automatically as 2x the configured rate (floored at 1). Set this on shared/rate-limited slurmrestd deployments — scale testing found slurmrestd itself, not the Kubernetes API, is the fragile dependency under a bridge burst. |
 | `config.maxUserPriority` | Caps user-originated priority requests so no job owner can jump the whole mixed queue. |
