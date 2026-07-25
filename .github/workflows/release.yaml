@@ -24,10 +24,46 @@ name: release
 #      version about to ship. Get it reviewed and merged to main.
 #   2. Tag that merged commit `vX.Y.Z` (matching the Chart.yaml bump) and
 #      push the tag. This workflow then builds/pushes images tagged
-#      `vX.Y.Z` + `latest`, and packages/pushes charts whose Chart.yaml
-#      already reads `vX.Y.Z` — so image tag and chart appVersion agree
-#      because step 1 set them together, not because this workflow enforces
-#      it.
+#      `vX.Y.Z` (plus `latest`, but only for a non-pre-release tag — see M4
+#      below), and packages/pushes charts whose Chart.yaml already reads
+#      `vX.Y.Z` — so image tag and chart appVersion agree because step 1 set
+#      them together, not because this workflow enforces it.
+#
+# M1 (supply-chain hardening): every image this workflow pushes is signed with
+# cosign in keyless (OIDC) mode and carries a SLSA provenance attestation plus
+# an SPDX SBOM. There is no signing key in this repo or in its secrets — the
+# identity inside the signing certificate IS this workflow: cosign exchanges
+# the job's short-lived GitHub OIDC token for a Fulcio certificate whose SAN is
+# the workflow file at the tagged ref, and records the signature in Rekor. A
+# leaked or rotated private key is therefore not a failure mode we have.
+#
+# Signing is done BY DIGEST, never by tag. A tag is mutable, so a signature
+# "on v1.2.0" proves nothing once someone republishes that tag over different
+# bytes; a digest signature is bound to the exact bytes a consumer pulls.
+#
+# HOW A CONSUMER VERIFIES a release image (replace <owner>/<repo>):
+#
+#   cosign verify \
+#     --certificate-identity-regexp '^https://github\.com/<owner>/<repo>/\.github/workflows/release\.yaml@refs/tags/v' \
+#     --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+#     ghcr.io/<owner>/<repo>/k8s-bridge:vX.Y.Z
+#
+# ...and reads the provenance/SBOM attestations that rode along with the push:
+#
+#   docker buildx imagetools inspect ghcr.io/<owner>/<repo>/k8s-bridge:vX.Y.Z \
+#     --format '{{ json .Provenance }}'
+#   docker buildx imagetools inspect ghcr.io/<owner>/<repo>/k8s-bridge:vX.Y.Z \
+#     --format '{{ json .SBOM }}'
+#
+# Pinning `--certificate-identity-regexp` to *this* workflow path matters: it
+# is what stops a signature produced by some other workflow (or another repo)
+# from satisfying the check. Verifying only "signed by someone with a Fulcio
+# cert" is close to verifying nothing.
+#
+# M4 (pre-release safety): the trigger below is `v*`, which matches
+# `v1.2.0-rc1` and `v1.2.0-beta.1` just as happily as `v1.2.0`. Only a tag
+# with no pre-release suffix is allowed to move `:latest` — see the `images`
+# job for the gate.
 on:
   push:
     tags:
@@ -66,36 +102,134 @@ jobs:
         run: go test -race ./...
 
   images:
-    name: build + push images
+    name: build + push images (signed, with provenance + SBOM)
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      # id-token: write is the whole basis of keyless signing — it lets this
+      # job (and only this job) mint a short-lived GitHub OIDC token that
+      # cosign trades with Fulcio for a signing certificate. Deliberately NOT
+      # granted at the workflow level: the test, charts and github-release jobs
+      # have no business minting identity tokens, and an OIDC token is a
+      # credential that can be exchanged for cloud/registry access elsewhere.
+      id-token: write
     defaults:
       run:
         working-directory: .
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # buildx replaces the plain `docker build` this job used to run, because
+      # provenance and SBOM attestations are a BuildKit output, not something
+      # bolted on afterwards: the `docker-container` driver records the build
+      # definition as it builds and pushes the result as OCI attestation
+      # manifests attached to the image digest. The classic builder that ships
+      # preinstalled on the runner cannot emit them at all.
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Installs the `cosign` binary only; keyless signing needs no key
+      # material, so there is nothing to configure here.
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      # M4: decide ONCE, for both images, whether this tag is allowed to move
+      # `:latest`. Before this gate every tag matching `v*` republished
+      # `:latest`, so tagging `v1.3.0-rc1` for a handful of testers silently
+      # handed a release candidate to everyone deploying the chart's default
+      # tag. "Stable" is defined narrowly: exactly vX.Y.Z, no SemVer
+      # pre-release suffix, no build metadata. Anything else publishes the
+      # version tag alone.
+      - name: decide whether ${{ github.ref_name }} may move ':latest'
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "PUSH_LATEST=true" >> "${GITHUB_ENV}"
+            echo "${GITHUB_REF_NAME} is a stable release -> will push the version tag AND move ':latest'"
+          else
+            echo "PUSH_LATEST=false" >> "${GITHUB_ENV}"
+            echo "${GITHUB_REF_NAME} is a pre-release -> will push the version tag ONLY; ':latest' stays where it is"
+          fi
       - name: build + push ghcr.io/${{ github.repository }}/k8s-bridge
         run: |
           set -euo pipefail
           repo="ghcr.io/${{ github.repository }}/k8s-bridge"
-          docker build -f Dockerfile -t "${repo}:${GITHUB_REF_NAME}" -t "${repo}:latest" .
-          docker push "${repo}:${GITHUB_REF_NAME}"
-          docker push "${repo}:latest"
+          tags=(--tag "${repo}:${GITHUB_REF_NAME}")
+          if [[ "${PUSH_LATEST}" == "true" ]]; then
+            tags+=(--tag "${repo}:latest")
+          fi
+          echo "pushing tags: ${tags[*]}"
+          # --provenance=mode=max records the full SLSA provenance (source
+          # repo, ref, builder, build invocation and materials), not just the
+          # minimal subject list `mode=min` would give. --sbom=true attaches
+          # an SPDX SBOM scanned from the final image filesystem.
+          # --metadata-file is how we learn what we actually pushed: buildx
+          # writes the resulting `containerimage.digest` there, and that
+          # digest — not the tag — is what gets signed in the next step.
+          docker buildx build \
+            --file Dockerfile \
+            "${tags[@]}" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "${RUNNER_TEMP}/k8s-bridge.metadata.json" \
+            --push \
+            .
+          digest="$(jq -r '."containerimage.digest"' "${RUNNER_TEMP}/k8s-bridge.metadata.json")"
+          echo "pushed digest: ${repo}@${digest}"
+          echo "K8S_BRIDGE_REF=${repo}@${digest}" >> "${GITHUB_ENV}"
       - name: build + push ghcr.io/${{ github.repository }}/ray-bridge
         run: |
           set -euo pipefail
           repo="ghcr.io/${{ github.repository }}/ray-bridge"
-          docker build -f Dockerfile.ray-bridge -t "${repo}:${GITHUB_REF_NAME}" -t "${repo}:latest" .
-          docker push "${repo}:${GITHUB_REF_NAME}"
-          docker push "${repo}:latest"
+          tags=(--tag "${repo}:${GITHUB_REF_NAME}")
+          if [[ "${PUSH_LATEST}" == "true" ]]; then
+            tags+=(--tag "${repo}:latest")
+          fi
+          echo "pushing tags: ${tags[*]}"
+          # Same flags and same reasoning as the k8s-bridge image above.
+          docker buildx build \
+            --file Dockerfile.ray-bridge \
+            "${tags[@]}" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "${RUNNER_TEMP}/ray-bridge.metadata.json" \
+            --push \
+            .
+          digest="$(jq -r '."containerimage.digest"' "${RUNNER_TEMP}/ray-bridge.metadata.json")"
+          echo "pushed digest: ${repo}@${digest}"
+          echo "RAY_BRIDGE_REF=${repo}@${digest}" >> "${GITHUB_ENV}"
+      # Signing is a separate step from building on purpose: both images are
+      # already pushed and immutable by now, so a signing failure cannot leave
+      # a half-tagged registry behind, and the digests being signed are the
+      # ones the registry actually returned.
+      - name: cosign sign (by digest)
+        run: |
+          set -euo pipefail
+          for ref in "${K8S_BRIDGE_REF}" "${RAY_BRIDGE_REF}"; do
+            echo "signing ${ref}"
+            # --yes suppresses the interactive "this will be public in Rekor"
+            # confirmation; there is no TTY on a runner. Note the ref is
+            # repo@sha256:... — cosign refuses to guess, and passing a tag
+            # here would be the classic mistake this whole step exists to
+            # avoid.
+            cosign sign --yes "${ref}"
+          done
+      # Verifying our own signature in the same run is cheap and catches the
+      # failure mode that would otherwise only surface for a consumer: an
+      # identity/issuer mismatch that makes the signature unverifiable in
+      # practice. This is the exact command documented in the header comment.
+      - name: cosign verify (self-check, same command consumers run)
+        run: |
+          set -euo pipefail
+          for ref in "${K8S_BRIDGE_REF}" "${RAY_BRIDGE_REF}"; do
+            echo "verifying ${ref}"
+            cosign verify \
+              --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yaml@refs/tags/" \
+              --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+              "${ref}"
+          done
 
   charts:
     name: package + push helm charts
@@ -119,6 +253,14 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/charts"
           helm package deploy/chart/k8s-bridge -d "${RUNNER_TEMP}/charts"
           helm package deploy/chart/ray-bridge -d "${RUNNER_TEMP}/charts"
+      # M4 does not need a gate here. Unlike the images, chart pushes carry no
+      # floating alias: `helm push` publishes exactly one OCI tag, the
+      # `version` from Chart.yaml, and never a `latest`. A pre-release chart
+      # therefore cannot displace the stable one — `helm install` without
+      # `--version` resolves the highest non-pre-release SemVer, which is
+      # Helm's own behaviour, not something this workflow arranges. If a
+      # `latest`/`stable` chart alias is ever added, it needs the same
+      # PUSH_LATEST gate the images job uses.
       - name: helm push (oci://ghcr.io/${{ github.repository }}/charts)
         run: |
           set -euo pipefail
