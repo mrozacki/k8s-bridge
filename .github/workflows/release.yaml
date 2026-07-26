@@ -91,7 +91,7 @@ jobs:
       # SEC3 (SHA-pin GitHub Actions, matches ci.yaml): actions pinned to full
       # commit SHAs, kept current by Dependabot, which preserves the trailing
       # human-readable version comment on each bump.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -119,7 +119,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # buildx replaces the plain `docker build` this job used to run, because
       # provenance and SBOM attestations are a BuildKit output, not something
       # bolted on afterwards: the `docker-container` driver records the build
@@ -239,7 +239,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           # Kept in step with chart-ci.yaml's pin; see that file's header for
@@ -275,7 +275,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # `gh` ships preinstalled on GitHub-hosted runners — no extra action
       # pin needed to create the release.
       - name: gh release create --generate-notes
