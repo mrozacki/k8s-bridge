@@ -10,6 +10,13 @@ everything below was exercised live on GKE unless marked otherwise.
 want a single screen instead of two windows, use `tools/demo-console/`
 (embeds a typed terminal plus the dashboards side by side; see its README).
 
+**Where each command runs.** Every fenced block runs **from the repo root**
+in your host shell — `cd` there once and stay put — unless its first line is
+`# [slurm-pod]`, which means the shell inside the Slurm login pod opened in
+§4. Several sections interleave the two, so keep both panes open: `kubectl`
+and `gcloud` never work inside the Slurm pod, and `sbatch`/`squeue`/
+`scontrol`/`sinfo` never work on the host.
+
 **Runs on GKE**, not `kind` — Slinky's Slurm stack needs real nodes to
 register dynamic slurmd workers against, and the CCC/DWS/topology sections
 exercise real GKE autoscaling behavior. Every section below is marked
@@ -50,7 +57,8 @@ session, live demo or not.
 
 - `gcloud` authenticated against your own GCP project:
   `export PROJECT_ID=${PROJECT_ID:?set your GCP project id}`
-- `kubectl`, `helm`, Go 1.26 on PATH.
+- `kubectl`, `helm`, `jq`, Go 1.26 on PATH. (`jq` is not optional — §5 and §9
+  pipe `kubectl -o json` through it.)
 - Optional, for the single-screen presenter console: `ttyd`
   (`brew install ttyd`) — see `tools/demo-console/README.md`.
 - Read first if you haven't: `README.md` (project framing),
@@ -67,13 +75,12 @@ JobSet, KubeRay, and the bridge controller — everything lives on the same
 pool of nodes; there is no separate Slurm cluster."
 
 ```bash
-cd experiments/01-gke-playground
-MIN_NODES=3 NUM_NODES=3 MAX_NODES=3 ./scripts/01-create-cluster.sh
-./scripts/02-install-components.sh     # cert-manager, JobSet, Kueue, KubeRay, Slurm (+ lua plugin)
-./scripts/03-configure-queues.sh
-kubectl apply -f ../05-topology/manifests/topology-tas.yaml
-kubectl apply -f ../06-multitenant/manifests/cohort-queues.yaml   # team-a/team-b cohort
-kubectl apply -f ../../deploy/crd/workloadmixing-crd.yaml
+MIN_NODES=3 NUM_NODES=3 MAX_NODES=3 ./experiments/01-gke-playground/scripts/01-create-cluster.sh
+./experiments/01-gke-playground/scripts/02-install-components.sh   # cert-manager, JobSet, Kueue, KubeRay, Slurm (+ lua plugin)
+./experiments/01-gke-playground/scripts/03-configure-queues.sh
+kubectl apply -f experiments/05-topology/manifests/topology-tas.yaml
+kubectl apply -f experiments/06-multitenant/manifests/cohort-queues.yaml   # team-a/team-b cohort
+kubectl apply -f deploy/crd/workloadmixing-crd.yaml
 
 # simulate topology (labels ARE the topology for Kueue TAS):
 for i in 0 1 2; do N=$(kubectl get nodes -o name | sed -n "$((i+1))p" | cut -d/ -f2); \
@@ -87,6 +94,15 @@ the rest of the demo.
 
 **Expected:** 3 nodes Ready, Kueue/JobSet/KubeRay/Slurm pods Running in
 their namespaces, `workloadmixings.k8s-bridge.x-k8s.io` CRD installed.
+
+`MIN_NODES=3` is not decoration: the cluster runs the
+`optimize-utilization` autoscaling profile, which removes idle nodes
+aggressively. Without a floor of 3 the pool can shrink before you label it
+and §6/§8 lose the topology they assume.
+
+**Budget ~25–30 minutes for this section** (`02-install-components.sh` alone
+waits up to 15 minutes on the Slurm chart). Bring the cluster up *before*
+your audience joins and start the live narration at §3 or §4.
 
 Cross-reference: `experiments/01-gke-playground/README.md`,
 `docs/adr/0003-gke-first-playground.md`.
@@ -103,14 +119,24 @@ run it in CR mode, which is the in-cluster production path."
 kubectl -n slurm get secret slurm-auth-slurm -o yaml | sed 's/namespace: slurm/namespace: slurm-jobs/' | kubectl apply -f -
 kubectl port-forward -n slurm svc/slurm-restapi 6820:6820 &
 kubectl -n slurm exec slurm-controller-0 -c slurmctld -- scontrol token username=root lifespan=14400 | sed 's/SLURM_JWT=//' > /tmp/wm-slurm-token
-kubectl apply -f ../../deploy/crd/workloadmixing-sample.yaml
-# in-cluster DNS does not resolve from the demo machine — aim the CR at the
-# port-forward BEFORE starting the binary (endpoint fields are read at
-# client construction; single-CR mode needs a restart to change them):
+kubectl apply -f deploy/crd/workloadmixing-sample.yaml
+
+# The sample CR is the IN-CLUSTER shape: an https service DNS name that does
+# not resolve from the demo machine, and a token path under the cluster's
+# Secret mount. Aim all three fields at your local setup BEFORE starting the
+# binary — endpoint fields are baked into the Slurm client at construction,
+# so single-CR mode needs a restart to change them afterwards.
+# allowInsecureHTTP is mandatory here, not optional: the CRD's CEL rule
+# REJECTS a plaintext http:// URL without it (the Slurm token is
+# bearer-equivalent). It is acceptable only because this traffic never
+# leaves the machine — it goes over the 127.0.0.1 port-forward above.
 kubectl -n slurm-jobs patch workloadmixing playground --type=merge \
-  -p '{"spec":{"slurmRestURL":"http://127.0.0.1:6820"}}'
-cd ../../. && make build
-./bin/k8s-bridge --workloadmixing slurm-jobs/playground &
+  -p '{"spec":{"slurmRestURL":"http://127.0.0.1:6820","allowInsecureHTTP":true,"slurmTokenFile":"/tmp/wm-slurm-token"}}'
+
+make build
+# --pprof-addr is off by default (heap profiles contain the Slurm token).
+# Pass it now if you intend to run the §15 scale drill; drop it otherwise.
+./bin/k8s-bridge --workloadmixing slurm-jobs/playground --pprof-addr 127.0.0.1:6060 &
 kubectl get workloadmixing -n slurm-jobs playground -o yaml | grep -A3 conditions   # Ready=True
 ```
 
@@ -149,7 +175,7 @@ binary from §2), only the Lease holder would tick; the other sits idle.
 That's what makes running a hot standby safe." Disable with
 `--leader-elect=false` only for a single-replica local/dev run without the
 Lease RBAC. **If demoing the Helm-chart deploy instead of the §2 local
-binary** (`helm upgrade --install k8s-bridge ../../deploy/chart/k8s-bridge
+binary** (`helm upgrade --install k8s-bridge deploy/chart/k8s-bridge
 ...`, same pattern as `experiments/09-scale-gpu-churn`), also show
 `kubectl -n slurm-jobs logs deploy/k8s-bridge | grep -i leader`.
 
@@ -221,8 +247,15 @@ happens invisibly underneath.
 nothing bridge-aware. A JobSubmit plugin auto-holds it the moment it hits
 the mixing partition."
 
+Open the Slurm pane now and **leave it open** — §5, §7 and §14 all come
+back to it:
+
 ```bash
 kubectl -n slurm exec -it deploy/slurm-login-slinky -- bash
+```
+
+```bash
+# [slurm-pod]
 sbatch --partition=mixing --ntasks=2 --wrap='srun hostname'   # NO --hold needed
 squeue -o "%i %T %k"    # comment narrates: held -> quota -> provisioning
 ```
@@ -246,6 +279,7 @@ pool."
 **Negative case, same breath:**
 
 ```bash
+# [slurm-pod]
 sbatch --partition=mixing --array=1-5 --wrap=hostname         # clean rejection
 ```
 
@@ -265,13 +299,43 @@ plugin), `docs/adr/0005-release-after-node-registration.md`.
 without needing real GPU hardware."
 
 ```bash
+# [slurm-pod]
 # memory: pods sized to --mem-per-cpu, node advertises RealMemory to match
 sbatch --partition=mixing --ntasks=1 --mem-per-cpu=2G --wrap='sleep 20'
+```
 
-# GPU simulation (no hardware, full chain): fake extended resource + count-only gres
-kubectl patch node <NODE> --subresource=status --type=merge -p '{"status":{"capacity":{"nvidia.com/gpu":"2"},"allocatable":{"nvidia.com/gpu":"2"}}}'
-kubectl create configmap wm-gres-conf -n slurm-jobs --from-literal=gres.conf="Name=gpu File=/dev/null"
-# add nvidia.com/gpu quota to the ClusterQueue, then:
+**GPU simulation has three prerequisites, all on the host side, all
+required.** Skipping any one leaves the job pending forever behind a
+misleading reason — do them *before* the `--gres` submit, not after
+(that mistake cost a live session an hour):
+
+```bash
+# 1. fake the extended resource on EVERY node you want eligible. Kueue's
+#    topology-aware scheduling is all-or-nothing per workload, so one faked
+#    node is not enough once the rest of the stack occupies the others.
+for N in $(kubectl get nodes -o name | cut -d/ -f2); do
+  kubectl patch node "$N" --subresource=status --type=merge \
+    -p '{"status":{"capacity":{"nvidia.com/gpu":"2"},"allocatable":{"nvidia.com/gpu":"2"}}}'
+done
+
+# 2. give the ClusterQueue nvidia.com/gpu quota. Without it Kueue reports
+#    "resource nvidia.com/gpu unavailable in ClusterQueue" and never admits.
+#    (team-a is the queue the sample CR's localQueue points at.)
+kubectl get clusterqueue team-a -o json \
+  | jq '.spec.resourceGroups[0].coveredResources += ["nvidia.com/gpu"]
+        | .spec.resourceGroups[0].flavors[].resources += [{"name":"nvidia.com/gpu","nominalQuota":"2"}]' \
+  | kubectl apply -f -
+
+# 3. the SLURM CLUSTER's gres.conf needs a device-file entry — already
+#    shipped as `Name=gpu File=/dev/null` in
+#    experiments/01-gke-playground/manifests/slurm-values.yaml. Verify it
+#    survived any local edit; do NOT recreate it as a bridge-side ConfigMap,
+#    the bridge deliberately no longer mounts one.
+grep -A1 'Name=gpu' experiments/01-gke-playground/manifests/slurm-values.yaml
+```
+
+```bash
+# [slurm-pod]
 sbatch --partition=mixing --gres=gpu:1 --wrap='srun echo GPU job'
 sinfo -N -o "%N %G"     # dynamic node advertises gpu:1
 
@@ -280,14 +344,17 @@ sbatch --partition=mixing --nodes=2 --ntasks-per-node=2 --time=10 --wrap='sleep 
 ```
 
 **Say on the GPU step specifically:** "This is a fully simulated GPU — no
-hardware, no cost. We patch a fake `nvidia.com/gpu` resource onto a node;
+hardware, no cost. We patch a fake `nvidia.com/gpu` resource onto the nodes;
 Kueue quota and the scheduler treat it exactly like a real device. On the
-Slurm side, GRES verification needs a device file entry, so the bridge
-mounts a tiny `gres.conf` ConfigMap. Every step of the chain except CUDA
+Slurm side, GRES verification needs a real device-file entry — on Slurm
+26.05 a count-only `Name=gpu` makes slurmd report zero devices and
+slurmctld drains the freshly registered node — so the Slurm cluster's own
+`gres.conf` points at `/dev/null`. Every step of the chain except CUDA
 itself is real." (ADR-0010.)
 
 **Expected:** the dynamic node's `sinfo -N -o "%N %G"` line shows `gpu:1`;
-the job runs and completes.
+the job runs and completes. If it sits at `ReqNodeNotAvail` instead, you
+skipped prerequisite 3 — check for `INVALID_REG` in the slurmctld log.
 
 Cross-reference: `docs/adr/0010-simulated-accelerators.md`.
 
@@ -300,6 +367,7 @@ way through to Kueue's Topology-Aware Scheduling. Slurm never has to know
 Kubernetes topology exists; its dynamic nodes just end up co-located."
 
 ```bash
+# [slurm-pod]
 sbatch --partition=mixing --ntasks=2 --switches=1 --wrap='sleep 30'
 # both slurmd pods land in ONE rack (dashboard TOPOLOGY panel);
 # jobs without --switches get best-effort block locality
@@ -329,9 +397,14 @@ admin — can bump a job's priority after submission, even while it's
 running, and Kueue immediately re-ranks who gets preempted first."
 
 ```bash
+# [slurm-pod]
 sbatch --partition=mixing --ntasks=1 --time=10 --wrap='sleep 180'   # note ID
 scontrol update job <ID> priority=700   # lua turns this into a directive
 scontrol show job <ID> | grep AdminComment   # wm:prio-applied=700
+```
+
+```bash
+# host: the same number, now on the Kubernetes side
 kubectl get workload -n slurm-jobs -o jsonpath='{.items[0].spec.priority}'  # 700
 ```
 
@@ -355,10 +428,27 @@ Cross-reference: `docs/architecture.md` §4b,
 automatically, and reclaimed the moment the owning team actually needs
 it — this composes with topology-aware scheduling too."
 
+> **This section needs a 4th node.** The filler is a 4-pod gang at 2 CPU
+> each, Kueue's topology-aware scheduling admits all-or-nothing, and an
+> `e2-standard-4` has room for exactly one such pod once the shared stack is
+> running. On the 3-node cluster §1 pins, Kueue reports `topology
+> "simulated-dc" allows to fit only 2 out of 4 pod(s)` and the borrow never
+> happens. Either resize first (`gcloud container clusters resize
+> k8s-bridge-playground --num-nodes=4 --zone europe-west1-b`) or shrink the
+> filler's `parallelism`. Measured live 2026-07-25 — skip this section
+> rather than debug it in front of an audience.
+
 ```bash
-kubectl create -f ../experiments/06-multitenant/manifests/teamb-filler-job.yaml
+kubectl create -f experiments/06-multitenant/manifests/teamb-filler-job.yaml
 kubectl get clusterqueue team-b -o jsonpath='{.status.flavorsUsage[0].resources[0]}'  # borrowed>0
+```
+
+```bash
+# [slurm-pod]
 sbatch --partition=mixing --ntasks=6 --wrap='sleep 120'   # team-a reclaims
+```
+
+```bash
 kubectl get events -n default | grep -i "reclamation within the cohort"
 ```
 
@@ -421,7 +511,7 @@ both native Kubernetes Jobs."
 
 ```bash
 # a native Kubernetes batch Job straight into the shared queue
-kubectl create -f ../01-gke-playground/workloads/kueue-batch-job.yaml
+kubectl create -f experiments/01-gke-playground/workloads/kueue-batch-job.yaml
 kubectl get jobs -n default   # note the generated name, e.g. sample-batch-xxxxx
 
 # a Slurm job contending for the SAME quota, submitted the ordinary way
@@ -453,7 +543,7 @@ so instead of queueing and waiting, a high-priority serving scale-up
 preempts batch outright to get capacity immediately."
 
 ```bash
-kubectl apply -f ../experiments/04-serving-admission/manifests/serving-queued.yaml
+kubectl apply -f experiments/04-serving-admission/manifests/serving-queued.yaml
 kubectl scale deployment queued-inference --replicas=3
 # serving preempts batch; batch re-admits on borrowed capacity (events tell the story)
 ```
@@ -483,13 +573,13 @@ hand; ray-bridge automates exactly this."
 
 ```bash
 # 1) shared cluster: infrastructure, deliberately NOT queued through Kueue
-kubectl apply -f ../experiments/03-open-items/manifests/ray-shared-cluster.yaml
+kubectl apply -f experiments/03-open-items/manifests/ray-shared-cluster.yaml
 
 # 2) the admission gap ray-bridge closes: a raw job into the shared cluster
 #    bypasses Kueue. An inner RayJob whose entrypointResources require
 #    wm-job-<id> instead cannot run until a Kueue-admitted dedicated worker
 #    advertises it (KubeRay forbids spec.suspend here — hence the pin, ADR-0013)
-kubectl apply -f ../experiments/03-open-items/manifests/ray-inner-job.yaml
+kubectl apply -f experiments/03-open-items/manifests/ray-inner-job.yaml
 
 # 3) the ray-bridge mechanism, by hand: a Kueue-gated dynamic worker, pinned to
 #    one task via a custom resource — this IS what ray-bridge automates
@@ -498,7 +588,7 @@ kubectl run pinned-worker --image=rayproject/ray:2.46.0 --labels="kueue.x-k8s.io
 # then a Ray task with resources={'wm-job-demo':1} runs exactly there
 
 # 4) RayService: inference as one elastic unit, outside Kueue, autoscaling
-kubectl apply -f ../experiments/03-open-items/manifests/ray-service.yaml   # autoscaling 1->3
+kubectl apply -f experiments/03-open-items/manifests/ray-service.yaml   # autoscaling 1->3
 ```
 
 **Point at:** `kubectl get raycluster,rayservice -A` — call out that
@@ -550,7 +640,7 @@ accelerator-required message unless a GPU node pool is used (backlog A5).
 node pools on demand.
 
 ```bash
-kubectl apply -f ../experiments/08-ccc-dws/manifests/compute-classes.yaml
+kubectl apply -f experiments/08-ccc-dws/manifests/compute-classes.yaml
 kubectl get pods -o wide -l job-name=ccc-probe-econo   # spot E2 node
 kubectl get nodes -L machine-family,cloud.google.com/gke-spot,compute-class
 ```
@@ -578,6 +668,10 @@ Reproduce (mirrors a scenario exercised during live validation — see
 kubectl get jobset -n slurm-jobs          # reaches Failed / DeadlineExceeded
 kubectl get events -n slurm-jobs \
   --field-selector reason=JobSetFailed    # "Slurm job <id> failed: JobSet reported Failed (<reason>)"
+```
+
+```bash
+# [slurm-pod]
 squeue -o "%i %T %r"                       # the job leaves PENDING — cancelled, not hanging
 scontrol show job <id> | grep Comment      # Comment=wm: JobSet failed: <reason>
 ```
@@ -608,7 +702,10 @@ one or two jobs."
 ./experiments/07-scale/scripts/backlog-slurm.sh 500     # throughput run
 ./experiments/07-scale/scripts/backlog-slurm.sh 2500    # backlog (stays pending)
 ./experiments/07-scale/scripts/backlog-k8s.sh 2000      # mixed queues/priorities
-curl -s http://127.0.0.1:6060/debug/pprof/profile?seconds=25 -o cpu.pprof  # profile the bridge
+
+# profiling only works if the bridge was started with --pprof-addr (§2) —
+# it is off by default because heap profiles contain the Slurm token
+curl -s http://127.0.0.1:6060/debug/pprof/profile?seconds=25 -o cpu.pprof
 ```
 
 **Point at:** the bridge's own Prometheus metrics on `:8080/metrics`
@@ -668,7 +765,7 @@ If quota looks stuck (a `ClusterQueue` shows usage but no matching
 clusters and disks are easy to forget about otherwise.
 
 ```bash
-cd experiments/01-gke-playground && ./scripts/99-teardown.sh
+./experiments/01-gke-playground/scripts/99-teardown.sh
 ```
 
 This deletes the cluster, then explicitly sweeps orphaned `pvc-*` disks
@@ -701,7 +798,11 @@ leftover resource before walking away.
 |---|---|
 | everything pending, "no topology domains" | you forgot the node labels (step 1) |
 | jobs un-releasable, "priority request forwarded" on release | old lua: hold(0)/release(INFINITE) must pass through |
-| GPU node drained "count reported lower" | gres.conf must be `Name=gpu File=/dev/null` (count-only is not enough for the gpu type) and mounted into slurmd conf-cache |
+| GPU node drained "count reported lower" | the SLURM CLUSTER's gres.conf must be `Name=gpu File=/dev/null` — count-only is not enough on 26.05. It belongs in the Slurm chart's `configFiles` (`experiments/01-gke-playground/manifests/slurm-values.yaml`), NOT in a bridge-side ConfigMap; the bridge deliberately no longer mounts one (§5 prerequisite 3) |
+| GPU job pending, "resource nvidia.com/gpu unavailable in ClusterQueue" | you skipped §5 prerequisite 2 — the ClusterQueue has no `nvidia.com/gpu` quota, so Kueue can never admit |
+| `kubectl`/`gcloud` "command not found" mid-demo | you are in the Slurm login pod; those blocks are host-side. Blocks marked `# [slurm-pod]` are the only ones that run inside it |
+| `curl :6060/debug/pprof` connection refused | pprof is off unless the bridge was started with `--pprof-addr 127.0.0.1:6060` (§2) |
+| `patch workloadmixing` rejected, "must use https unless allowInsecureHTTP is set" | the CRD's CEL rule refuses a plaintext URL on its own — patch `allowInsecureHTTP: true` in the same merge (§2) |
 | autoscaler deletes "racks" | pin the pool: min-nodes = num-nodes |
 | flex-start create fails on reservations | add `--reservation-affinity=none` |
 | DWS provisioning request `Failed` | GKE rejects CPU-only DWS Flex today — accelerators required (backlog A5); use Custom Compute Classes (§13 alternative) instead for a working demo of queued/preferred node classes |

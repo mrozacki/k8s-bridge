@@ -58,7 +58,7 @@ partitions:
       State: UP
       MaxTime: UNLIMITED
 
-# slurm.conf extensions — all three are live findings:
+# slurm.conf extensions — all three are live findings from session 2:
 # - GresTypes: without it sbatch rejects --gres=gpu:N outright;
 # - ReturnToService=2: without it dynamic nodes that vanished (preemption!)
 #   stay DOWN after re-registration and need manual `scontrol update
@@ -67,8 +67,8 @@ partitions:
 #   evicted nodes and requeue their job — 60 s tightens the preemption
 #   recovery loop for bridge-style dynamic nodes.
 #
-# L1 fix (2026-07-06): in the
-# live run, 20 slurmd pods reached Running but never registered as
+# L1 fix (2026-07-06, docs/notes/2026-07-06-batch2-live-deploy.md): in the
+# batch-2 live run, 20 slurmd pods reached Running but never registered as
 # dynamic Slurm nodes (sinfo only ever showed the static worker). Root cause,
 # confirmed by inspecting both Slurm's own docs (slurm.schedmd.com/
 # dynamic_nodes.html) and the slurm-operator's own rendered Controller CR
@@ -94,7 +94,7 @@ controller:
     SlurmdTimeout: "60"
     # L1 fix: dynamic-node registration requires the cons_tres select
     # plugin. Confidence: HIGH (see note above — this is the confirmed root
-    # cause of the registration failure).
+    # cause of the batch-2 registration failure).
     SelectType: select/cons_tres
     # L1 fix: MaxNodeCount is ALREADY hardcoded to 1024 by the slurm-operator
     # itself (internal/builder/controllerbuilder/controller_config.go) and
@@ -120,9 +120,10 @@ controller:
 # partitions: auto-hold (priority=0), reject array jobs, and allow only
 # priority mutations after submit.
 configFiles:
-  # Count-only GRES declaration (no File=): slurmd skips device
-  # verification, enabling SIMULATED GPUs (fake extended resource on the
-  # K8s node) to exercise the full GRES chain without hardware.
+  # GRES declaration backed by a real device file, which is what lets
+  # SIMULATED GPUs (fake extended resource on the K8s node) exercise the
+  # full GRES chain without hardware. See the inline note below for why the
+  # count-only form does not work on Slurm 26.05.
   gres.conf: |
     # File= is REQUIRED, not decoration: on Slurm 26.05 a count-only
     # "Name=gpu" makes slurmd verify the actual device count, report 0, and
@@ -160,7 +161,7 @@ configFiles:
       -- ADR-0009: turn `scontrol update priority=N` into a bridge directive.
       -- Slurm's own priority field stays untouched (it is scheduler-owned);
       -- the bridge reads admin_comment and patches the Kueue Workload.
-      -- Intercept ONLY plain user priorities. Live finding:
+      -- Intercept ONLY plain user priorities. Live finding (session 5):
       -- hold (0) and release (INFINITE=0xFFFFFFFE) are ALSO delivered as
       -- priority updates through this hook - swallowing them makes jobs
       -- permanently unreleasable (scontrol release AND slurmrestd both).
@@ -173,7 +174,7 @@ configFiles:
         end
         job_desc.admin_comment = string.format("wm:prio=%u", p)
         job_desc.priority = slurm.NO_VAL
-        -- known finding: slurm.log_user always prepends "error:" when
+        -- session-5 finding: slurm.log_user always prepends "error:" when
         -- called from job_submit/job_modify context, even at plain log
         -- level - a known Slurm quirk. This is the SUCCESS path (the
         -- directive was accepted and forwarded), so log_info (controller

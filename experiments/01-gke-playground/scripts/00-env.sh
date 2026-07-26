@@ -13,6 +13,10 @@ export CLUSTER_NAME="k8s-bridge-playground"
 export MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-4}" # 4 vCPU/16Gi, spot
 export NUM_NODES="${NUM_NODES:-2}"
 export MAX_NODES="${MAX_NODES:-4}"
+# Autoscaler floor. The cluster uses the optimize-utilization profile, which
+# removes idle nodes aggressively — set MIN_NODES = NUM_NODES to pin the pool
+# whenever node labels carry meaning (topology sections of the demo/tutorial).
+export MIN_NODES="${MIN_NODES:-1}"
 
 # Component versions (verified 2026-07-03 against upstream release pages).
 export KUEUE_VERSION="v0.18.2"
