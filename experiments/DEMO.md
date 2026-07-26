@@ -336,8 +336,12 @@ grep -A1 'Name=gpu' experiments/01-gke-playground/manifests/slurm-values.yaml
 
 ```bash
 # [slurm-pod]
-sbatch --partition=mixing --gres=gpu:1 --wrap='srun echo GPU job'
-sinfo -N -o "%N %G"     # dynamic node advertises gpu:1
+# NOTE the trailing sleep. With a bare `srun echo`, the whole lifecycle —
+# JobSet created, node registered, job run, JobSet cleaned up — takes about
+# 7 seconds, and the dynamic node is gone before you can type sinfo. The
+# sleep keeps it on screen long enough to point at. Measured live 2026-07-26.
+sbatch --partition=mixing --gres=gpu:1 --wrap='srun echo GPU job; sleep 90'
+sinfo -N -o "%N %T %G"  # dynamic node advertises gpu:1 (idle, then allocated)
 
 # --nodes / --ntasks-per-node and wall-clock leak guard:
 sbatch --partition=mixing --nodes=2 --ntasks-per-node=2 --time=10 --wrap='sleep 30'
@@ -509,14 +513,30 @@ one submitted — first up gets the resources; if both want more than the
 pool has, whichever has priority wins, exactly like it would if they were
 both native Kubernetes Jobs."
 
+> **The queue label must match the bridge's `localQueue`, or nothing
+> contends.** `kueue-batch-job.yaml` ships targeting LocalQueue `main`
+> (→ ClusterQueue `main-queue`), because its own experiment README uses it
+> standalone. The sample `WorkloadMixing` CR routes Slurm jobs to `team-a`.
+> Applied unmodified, the two workloads land in **two different
+> ClusterQueues** with separate quota — they never compete, and the claim
+> above is visibly false on screen. The override below is what makes this
+> section demonstrate what it says. Measured live 2026-07-26.
+
 ```bash
-# a native Kubernetes batch Job straight into the shared queue
-kubectl create -f experiments/01-gke-playground/workloads/kueue-batch-job.yaml
+# a native Kubernetes batch Job, retargeted at the SAME LocalQueue the
+# bridge's CR uses (LocalQueue team-a exists in `default` already —
+# cohort-queues.yaml creates it there and in slurm-jobs)
+sed 's|kueue.x-k8s.io/queue-name: main$|kueue.x-k8s.io/queue-name: team-a|' \
+  experiments/01-gke-playground/workloads/kueue-batch-job.yaml | kubectl create -f -
 kubectl get jobs -n default   # note the generated name, e.g. sample-batch-xxxxx
 
 # a Slurm job contending for the SAME quota, submitted the ordinary way
 kubectl -n slurm exec deploy/slurm-login-slinky -- \
   sbatch --partition=mixing --ntasks=2 --wrap='sleep 90'
+
+# the money shot: both, plus anything from §11, in ONE ClusterQueue
+kubectl get workload -A -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name,QUEUE:.spec.queueName,ADMITTED:.status.conditions[?(@.type=="Admitted")].status'
+kubectl get clusterqueue team-a -o jsonpath='{.status.flavorsUsage}'
 ```
 
 **Point at:** the `WORKLOADS` panel in `bridge-top.sh` — both objects show
@@ -661,11 +681,17 @@ forever. This is what closed the old D1 gap."
 Reproduce (mirrors a scenario exercised during live validation — see
 `docs/VALIDATION.md`):
 
+> **Do not try to trigger this live.** Both reproductions this section used
+> to suggest are impossible on a running JobSet: `spec.replicatedJobs` is
+> **immutable**, so neither patching `activeDeadlineSeconds` nor swapping in
+> an unpullable image is accepted by the apiserver, and force-deleting the
+> pod just makes JobSet restart it. Narrate this section from the runbook and
+> the metric instead of performing it — the mechanism itself is validated,
+> it simply cannot be provoked on demand. Measured live 2026-07-26.
+
 ```bash
-# submit a job, then force its JobSet to blow its deadline before nodes
-# register — e.g. patch a very short activeDeadlineSeconds on the JobSet,
-# or starve it of an image it can never pull, then watch the bridge react:
-kubectl get jobset -n slurm-jobs          # reaches Failed / DeadlineExceeded
+# read-only: what you would see if a JobSet had died
+kubectl get jobset -n slurm-jobs          # would reach Failed / DeadlineExceeded
 kubectl get events -n slurm-jobs \
   --field-selector reason=JobSetFailed    # "Slurm job <id> failed: JobSet reported Failed (<reason>)"
 ```

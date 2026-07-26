@@ -320,6 +320,21 @@ it invokes is executable. It was verified in both directions — passing on the
 corrected documents, and correctly naming file and line when the original
 defects were reintroduced deliberately.
 
+The corrected runbook was then walked end to end on a live cluster, and that
+pass found three further defects which no static check could have caught,
+because each one concerns what the reader *sees* rather than whether a command
+runs. The mixing section — the one the runbook itself calls the point of the
+project — shipped a workload manifest targeting a different queue from the one
+the bridge routes Slurm jobs to, so the two workloads landed in separate quota
+pools and never contended, while the accompanying narration described them
+sharing one. The simulated-GPU section asked the reader to observe a property
+of a node that, with the job as written, is deregistered about seven seconds
+after it appears. And the failure-handling section proposed two ways to kill a
+JobSet on demand, both of which the apiserver rejects because the relevant
+field is immutable. All three are corrected; the lesson recorded alongside them
+is that static verification covers the commands, not the claims made about
+their output.
+
 ## Traceability
 
 Design rationale for the mechanisms referenced above is recorded in the

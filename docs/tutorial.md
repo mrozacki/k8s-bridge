@@ -442,8 +442,11 @@ kubectl get clusterqueue team-a -o json \
 
 ```bash
 # [slurm-pod]
-sbatch --partition=mixing --gres=gpu:1 --wrap='srun echo GPU job'
-sinfo -N -o "%N %G"     # dynamic node advertises gpu:1
+# NOTE the trailing sleep. With a bare `srun echo` the whole lifecycle —
+# JobSet created, node registered, job run, JobSet cleaned up — takes about
+# 7 seconds, and the dynamic node is gone before you can type sinfo.
+sbatch --partition=mixing --gres=gpu:1 --wrap='srun echo GPU job; sleep 90'
+sinfo -N -o "%N %T %G"  # dynamic node advertises gpu:1 (idle, then allocated)
 
 # --nodes / --ntasks-per-node and wall-clock leak guard:
 sbatch --partition=mixing --nodes=2 --ntasks-per-node=2 --time=10 --wrap='sleep 30'
@@ -608,9 +611,20 @@ This is the scenario that makes the whole point of the project concrete:
 two completely different workload systems, same admission authority, same
 numbers.
 
+> **The queue label has to match the bridge's `localQueue`, or the two
+> workloads never actually compete.** `kueue-batch-job.yaml` ships targeting
+> LocalQueue `main` (→ ClusterQueue `main-queue`) because its own experiment
+> README uses it standalone, while the sample `WorkloadMixing` CR routes Slurm
+> jobs to `team-a`. Applied unmodified, you get two workloads in two separate
+> ClusterQueues with separate quota — which does not demonstrate anything this
+> section claims. The `sed` below retargets it. Verified live 2026-07-26.
+
 ```bash
-# a native Kubernetes batch Job straight into the shared queue
-kubectl create -f experiments/01-gke-playground/workloads/kueue-batch-job.yaml
+# a native Kubernetes batch Job, retargeted at the SAME LocalQueue the bridge
+# uses (LocalQueue team-a already exists in `default` — cohort-queues.yaml
+# creates it there as well as in slurm-jobs)
+sed 's|kueue.x-k8s.io/queue-name: main$|kueue.x-k8s.io/queue-name: team-a|' \
+  experiments/01-gke-playground/workloads/kueue-batch-job.yaml | kubectl create -f -
 kubectl get jobs -n default   # note the generated name, e.g. sample-batch-xxxxx
 
 # a Slurm job contending for the SAME quota, submitted the ordinary way
@@ -774,11 +788,16 @@ forever.
 
 Reproduce it:
 
+> **This one cannot be provoked on demand.** A JobSet's
+> `spec.replicatedJobs` is immutable, so neither patching
+> `activeDeadlineSeconds` nor swapping in an unpullable image is accepted by
+> the apiserver, and force-deleting the pod just makes JobSet restart it. The
+> mechanism is validated; treat the commands below as "what you would see"
+> rather than a reproduction. Verified live 2026-07-26.
+
 ```bash
-# submit a job, then force its JobSet to blow its deadline before nodes
-# register — e.g. patch a very short activeDeadlineSeconds on the JobSet,
-# or starve it of an image it can never pull, then watch the bridge react:
-kubectl get jobset -n slurm-jobs          # reaches Failed / DeadlineExceeded
+# read-only: what a dead JobSet looks like from both sides
+kubectl get jobset -n slurm-jobs          # would reach Failed / DeadlineExceeded
 kubectl get events -n slurm-jobs \
   --field-selector reason=JobSetFailed    # "Slurm job <id> failed: JobSet reported Failed (<reason>)"
 ```
