@@ -292,6 +292,34 @@ supply-chain attestation and governance-document steps that only make
 sense once the repository is actually public), and are tracked separately
 from the completed remediation.
 
+## Documentation as an executable artifact
+
+The tutorial and the demo runbook are not prose about the system — they are
+sequences of commands a reader is expected to run, which makes them code that
+can rot like any other. A 2026-07-26 audit read both documents from the
+executor's point of view rather than the reader's and found nine defects that
+would have stopped a live run: command blocks whose relative paths resolved
+outside the repository once an earlier section had changed directory; a
+configuration patch the CRD's own validation rule would reject, because it
+omitted the explicit opt-in required for a plaintext endpoint; a simulated-GPU
+section that predated a live-validated rewrite of the same material elsewhere;
+a profiling step that could never produce a profile, because the flag enabling
+it is off by default and was never mentioned; and blocks that silently
+interleaved commands meant for two different shells (the reader's machine and
+the Slurm login pod).
+
+The instructive part was the pattern. The one section that was correct was the
+one that had actually been executed during an earlier live session; sections
+that had only been reviewed still carried their defects. Review does not find
+this class of problem.
+
+All nine are fixed, and a check now runs in continuous integration that parses
+every command block in the runnable documents and enforces that each block is
+repo-root-relative, that every path it references exists, and that every script
+it invokes is executable. It was verified in both directions — passing on the
+corrected documents, and correctly naming file and line when the original
+defects were reintroduced deliberately.
+
 ## Traceability
 
 Design rationale for the mechanisms referenced above is recorded in the
