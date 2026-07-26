@@ -21,6 +21,10 @@ on:
         "test/**",
         "deploy/crd/**",
         "deploy/chart/k8s-bridge/crds/**",
+        "scripts/**",
+        "experiments/DEMO.md",
+        "docs/tutorial.md",
+        "docs/installation.md",
         ".github/workflows/ci.yaml",
       ]
   pull_request:
@@ -35,6 +39,10 @@ on:
         "test/**",
         "deploy/crd/**",
         "deploy/chart/k8s-bridge/crds/**",
+        "scripts/**",
+        "experiments/DEMO.md",
+        "docs/tutorial.md",
+        "docs/installation.md",
         ".github/workflows/ci.yaml",
       ]
 
@@ -69,6 +77,11 @@ jobs:
         run: go vet ./...
       - name: thin-surface guard (WAS readiness, ADR audit D1)
         run: ./scripts/verify-thin-surface.sh
+      # Every path a documented command block references must resolve from
+      # the repo root. Cheap, and it catches the one defect class that made
+      # whole sections of the demo runbook unrunnable without anyone noticing.
+      - name: doc-command guard (runnable documentation)
+        run: ./scripts/verify-doc-commands.sh
       - name: benchmarks (smoke)
         run: go test -bench=. -benchtime=100x -run=NoTests ./internal/translate/
       # Benchmark regression gate (backlog AUD5), upgraded from the smoke

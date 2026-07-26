@@ -1,4 +1,4 @@
-.PHONY: all build test test-integration coverage vet fmt lint run tidy envtest-assets
+.PHONY: all build test test-integration coverage vet fmt lint run tidy envtest-assets verify-surface verify-docs
 
 # Kubernetes version for envtest binaries (kube-apiserver + etcd).
 ENVTEST_K8S_VERSION ?= 1.33
@@ -12,7 +12,7 @@ ENVTEST_K8S_VERSION ?= 1.33
 ENVTEST_TOOL_VERSION ?= v0.24.1
 SETUP_ENVTEST := go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_TOOL_VERSION)
 
-all: fmt vet verify-surface test build
+all: fmt vet verify-surface verify-docs test build
 
 build:
 	go build -o bin/k8s-bridge ./cmd/k8s-bridge
@@ -40,6 +40,11 @@ coverage:
 
 verify-surface:
 	./scripts/verify-thin-surface.sh
+
+# Guards the runnable docs: every path a command block references must
+# resolve from the repo root, which is the cwd every such block assumes.
+verify-docs:
+	./scripts/verify-doc-commands.sh
 
 vet:
 	go vet ./...
