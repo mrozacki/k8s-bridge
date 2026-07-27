@@ -5,6 +5,29 @@ follows [Keep a Changelog](https://keepachangelog.com/); until 1.0 there are
 NO compatibility promises between versions (see docs/upgrade-guide.md), and
 breaking changes are called out per release.
 
+## Unreleased
+
+### Changed
+- **`ray-bridge` is now labelled experimental**, and Ray has been removed from
+  `docs/tutorial.md` and from the narrated demo runbook. The scope decision in
+  ADR-0002 is **unchanged** — `RayCluster` admission through Kueue is still in
+  scope, `RayJob` is still out of it — but the controller that automates it has
+  only ever been validated at small scale on `kind`, while every other
+  mechanism those two documents walk has been exercised live on GKE. Showing
+  them side by side implied a maturity ray-bridge has not earned.
+
+  **Nothing is removed from the release:** the `ray-bridge` binary, chart,
+  configuration reference, and `experiments/10-ray-bridge/` all still ship and
+  are still installable. This is a documentation and labelling change, and it
+  is reversible once ray-bridge has a live multi-node validation. See the
+  2026-07-27 status update appended to ADR-0002.
+
+  This landed on `main` shortly **after** v0.3.1 was tagged, so it is **not**
+  in the published v0.3.1 artifacts — the released tutorial and chart still
+  describe Ray as they did in v0.3.0. It ships in the next release. The chart
+  versions on `main` (k8s-bridge 0.4.1, ray-bridge 0.3.1) are the ones v0.3.1
+  published; bump them again when cutting the next tag.
+
 ## v0.3.1 — 2026-07-27
 
 A documentation-and-operability patch on top of v0.3.0, driven by a
@@ -77,29 +100,15 @@ breaking changes; the one new API field defaults to the previous behaviour.
 - Troubleshooting tables in both documents gained a row per finding, keyed on
   the symptom the reader actually sees.
 
-### Changed
-- **`ray-bridge` is now labelled experimental**, and Ray has been removed from
-  `docs/tutorial.md` and from the narrated demo runbook. The scope decision in
-  ADR-0002 is **unchanged** — `RayCluster` admission through Kueue is still in
-  scope, `RayJob` is still out of it — but the controller that automates it has
-  only ever been validated at small scale on `kind`, while every other
-  mechanism those two documents walk has been exercised live on GKE. Showing
-  them side by side implied a maturity ray-bridge has not earned.
-
-  **Nothing was removed from the release:** the `ray-bridge` binary, chart,
-  configuration reference, and `experiments/10-ray-bridge/` are all still here
-  and still installable. This is a documentation and labelling change, and it
-  is reversible once ray-bridge has a live multi-node validation. See the
-  2026-07-27 status update appended to ADR-0002.
-
 ### Notes
 - Two reported items were deliberately **not** acted on. "Frame Ray around
   `RayJob` rather than `RayCluster`" inverts ADR-0002 — `RayJob` is out of
   scope precisely because it is already Kueue-native, while `RayCluster` is in
   scope because its shared-cluster admission gap is the problem this project
-  exists to close. (Ray *was* subsequently dropped from the tutorial, but on
-  maturity grounds and without touching the scope decision — see **Changed**
-  above. The two are different actions with different consequences.) "Pin the
+  exists to close. (Ray *was* subsequently dropped from the
+  tutorial, but on maturity grounds and without touching the scope decision —
+  see Unreleased above. That landed after this tag was cut. The two are
+  different actions with different consequences.) "Pin the
   cluster to `e2-standard-4`" was already the case in `00-env.sh`; the real
   concern underneath it (allocatable CPU below one full core on a hand-built
   cluster) is now a preflight warning instead.
