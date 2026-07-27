@@ -5,6 +5,90 @@ follows [Keep a Changelog](https://keepachangelog.com/); until 1.0 there are
 NO compatibility promises between versions (see docs/upgrade-guide.md), and
 breaking changes are called out per release.
 
+## v0.3.1 — 2026-07-27
+
+A documentation-and-operability patch on top of v0.3.0, driven by a
+first-time walkthrough of `docs/tutorial.md` on a fresh GKE project. No
+breaking changes; the one new API field defaults to the previous behaviour.
+
+### Added
+- **`WorkloadMixing.spec.failedJobSetRetention`** (Go duration; also available
+  as `config.failedJobSetRetention` in the chart's file mode). Keeps a JobSet
+  that outlived its Slurm job around for post-mortem inspection instead of
+  deleting it in the same tick that fails the job. **Defaults to `0`, which is
+  exactly the previous behaviour**, so upgrading changes nothing until you opt
+  in.
+
+  This fixes an operability defect rather than adding a knob: the bridge failed
+  the Slurm job and deleted the JobSet together, so the two commands the
+  tutorial gives you for diagnosing a failure — `kubectl get jobset` and
+  `kubectl get events --field-selector reason=JobSetFailed` — always returned
+  `No resources found`, including right after a job genuinely failed. Failure
+  handling worked and then erased its own evidence.
+
+  Retention is cheap: only a JobSet that already reached a terminal condition
+  is ever retained, so its pods are finished and Kueue has released its quota.
+  It holds an API object, not capacity. Slurm-side node records are still
+  deleted immediately. The window never extends on re-visit, an unparseable
+  stamp is treated as expired, and the value is capped at 7d.
+- **Tutorial section 2b: deploying the bridge in-cluster with Helm.** The
+  tutorial previously only ran the controller as a binary on the reader's
+  machine, which left the impression that a core component of the architecture
+  is a client-side script — and when that shell closed, jobs sat in
+  `JobHeldUser` with nothing visibly wrong on the Kubernetes side. The new
+  section documents the four credential/config prerequisites the chart
+  deliberately does not guess, including `configSource=cr` (left at its `file`
+  default, the controller ignores every `WorkloadMixing` CR while looking
+  perfectly healthy).
+
+### Fixed
+- **A retained JobSet re-issued its `DeleteNode` calls on every tick** — two
+  `slurmrestd` calls per poll interval for the whole retention window, against
+  an API that shares `slurmctld`'s lock. Introduced by the retention feature
+  above and caught only by a live run; a `nodes-released` marker now ends the
+  loop, while retries are deliberately kept for as long as the deletes are
+  still failing (live, the first attempts lost a race with a job in
+  `COMPLETING`).
+- **`kubectl get secret -o yaml | sed | kubectl apply -f -` was not
+  idempotent** in the tutorial and the demo runbook: it pipes the source
+  object's `resourceVersion` back at the apiserver, so a second run fails with
+  *"the object has been modified"* — and the tutorial asks for that command
+  twice. Both now strip the server-managed metadata, which is what
+  `docs/installation.md` §3.1 always did.
+- **Bring-up steps are chained with `&&`**, and `03-configure-queues.sh`
+  preflights the cluster connection and the Kueue CRDs. Unchained, a failed
+  first step (usually an unset `PROJECT_ID`, which the scripts correctly bail
+  on) surfaced three commands later as `no matches for kind "ResourceFlavor"`
+  — a missing-CRD error that reads like a broken manifest.
+- **The topology labelling loop labels every node**, not the first three, so
+  resizing the pool (section 8 asks for a 4th node) no longer silently shrinks
+  the topology later sections assume.
+- **The backgrounded `kubectl port-forward` is waited on.** Its failure was
+  silent; the only symptom was the bridge printing `connection refused`
+  indefinitely.
+- **`<ID>` placeholders replaced with captured job ids** (`sbatch --parsable`).
+  Pasted verbatim, bash reads `<` and `>` as redirections and fails on a file
+  named `ID`, which looks like a Slurm error and is not one.
+- **Section 13 (DWS) demonstrates the path that works** — an accelerator node
+  pool with `--enable-queued-provisioning`, the shipped `AdmissionCheck` stack,
+  and a Slurm partition routed at the DWS queue — instead of walking the reader
+  into a CPU-only request GKE is known to reject. The zone is parameterised
+  (L4 availability is zone-specific) and the GPU cost is called out explicitly.
+- Troubleshooting tables in both documents gained a row per finding, keyed on
+  the symptom the reader actually sees.
+
+### Notes
+- Two reported items were deliberately **not** acted on. "Frame Ray around
+  `RayJob` rather than `RayCluster`" inverts ADR-0002 — `RayJob` is out of
+  scope precisely because it is already Kueue-native, while `RayCluster` is in
+  scope because its shared-cluster admission gap is the problem this project
+  exists to close. "Pin the cluster to `e2-standard-4`" was already the case in
+  `00-env.sh`; the real concern underneath it (allocatable CPU below one full
+  core on a hand-built cluster) is now a preflight warning instead.
+- Section 13 was **not** executed in this release's validation — it is the only
+  part of the tutorial that provisions GPU nodes. Everything past
+  `ProvisioningRequest: Accepted` remains unverified.
+
 ## v0.3.0 — 2026-07-27
 
 Everything below landed on `main` between 2026-07-13 and 2026-07-27, on top of
