@@ -172,7 +172,14 @@ path, and the one this tutorial uses throughout.
 > in-cluster deployment. Do one or the other, not both at once.
 
 ```bash
-kubectl -n slurm get secret slurm-auth-slurm -o yaml | sed 's/namespace: slurm/namespace: slurm-jobs/' | kubectl apply -f -
+# The sed also strips the server-managed metadata: a Secret piped straight
+# from `get -o yaml` back into `apply` carries its source resourceVersion, and
+# re-running this (§2b repeats it) fails with "the object has been modified".
+# Reproduced live 2026-07-27.
+kubectl -n slurm get secret slurm-auth-slurm -o yaml \
+  | sed -e 's/namespace: slurm/namespace: slurm-jobs/' -e '/resourceVersion:/d' \
+        -e '/^  uid:/d' -e '/creationTimestamp:/d' \
+  | kubectl apply -f -
 
 # The port-forward runs in the background, which means its failure is silent:
 # if slurm-restapi isn't up yet, it exits immediately and the only symptom is
@@ -255,7 +262,9 @@ than a default a chart can guess:
 #    nothing about it, because the failure is the kubelet's, not the bridge's.
 kubectl create namespace slurm-jobs --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n slurm get secret slurm-auth-slurm -o yaml \
-  | sed 's/namespace: slurm/namespace: slurm-jobs/' | kubectl apply -f -
+  | sed -e 's/namespace: slurm/namespace: slurm-jobs/' -e '/resourceVersion:/d' \
+        -e '/^  uid:/d' -e '/creationTimestamp:/d' \
+  | kubectl apply -f -
 
 # 2. the Slurm REST token, as the Secret the chart mounts (values.yaml:
 #    slurmTokenSecret, default "slurm-rest-token"). lifespan is in seconds;

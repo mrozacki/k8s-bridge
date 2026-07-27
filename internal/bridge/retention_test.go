@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -229,5 +230,69 @@ func TestRetentionValidation(t *testing.T) {
 				t.Errorf("retention %s: unexpected validation error: %v", tc.retention, err)
 			}
 		})
+	}
+}
+
+// TestRetainedJobSetStopsRetryingNodeDeletes is the regression for a defect the
+// retention feature introduced and a live run caught (2026-07-27): a retained
+// JobSet stayed in ownedJobSets for its whole window, so cleanupFinishedJobs
+// re-issued its DeleteNode calls on EVERY tick — two slurmrestd calls per
+// pollInterval for an hour, against an API that shares slurmctld's lock.
+//
+// The first pass must still delete, and the second must not repeat it.
+func TestRetainedJobSetStopsRetryingNodeDeletes(t *testing.T) {
+	fs := &fakeSlurm{jobs: []slurm.Job{
+		{JobID: 815, JobState: []string{"PENDING"}, Hold: false, StateReason: "BadConstraints"},
+	}}
+	b, _ := testBridge(t, fs, failedJobSet(t, 815, "deadline exceeded"))
+	withRetention(b, time.Hour)
+
+	if err := b.tick(context.Background()); err != nil {
+		t.Fatalf("first tick: %v", err)
+	}
+	afterFirst := len(fs.deletedNodes)
+	if afterFirst == 0 {
+		t.Fatal("first pass must still delete the dynamic node records")
+	}
+	js, ok := jobSetIn(t, b, translate.JobSetName(815))
+	if !ok {
+		t.Fatal("retained JobSet disappeared")
+	}
+	if js.Annotations[translate.NodesReleasedAnnotation] != "true" {
+		t.Errorf("expected the %s marker after a clean delete pass", translate.NodesReleasedAnnotation)
+	}
+
+	if err := b.tick(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if len(fs.deletedNodes) != afterFirst {
+		t.Errorf("node deletes re-issued on a later tick: %d -> %d; a retained JobSet must not "+
+			"re-run the delete loop once its records are gone", afterFirst, len(fs.deletedNodes))
+	}
+}
+
+// TestRetainedJobSetRetriesNodeDeletesWhileTheyFail is the other half of the
+// same fix: the marker must NOT be stamped after a pass that errored. Live, the
+// first attempts raced a job in COMPLETING ("Requested nodes are busy") and only
+// succeeded a few ticks later — giving up after one try would leave slurmctld
+// advertising capacity that no longer exists until SlurmdTimeout.
+func TestRetainedJobSetRetriesNodeDeletesWhileTheyFail(t *testing.T) {
+	fs := &fakeSlurm{
+		jobs:          []slurm.Job{{JobID: 816, JobState: []string{"PENDING"}, Hold: false, StateReason: "BadConstraints"}},
+		deleteNodeErr: errors.New("422 Unprocessable Entity: Requested nodes are busy"),
+	}
+	b, _ := testBridge(t, fs, failedJobSet(t, 816, "deadline exceeded"))
+	withRetention(b, time.Hour)
+
+	if err := b.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	js, ok := jobSetIn(t, b, translate.JobSetName(816))
+	if !ok {
+		t.Fatal("retained JobSet disappeared")
+	}
+	if js.Annotations[translate.NodesReleasedAnnotation] == "true" {
+		t.Error("node records were NOT released (every delete failed) — the marker must not be stamped, " +
+			"or the retry that eventually succeeds live would never happen")
 	}
 }

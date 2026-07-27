@@ -116,7 +116,14 @@ config from a file or from this `WorkloadMixing` custom resource — we'll
 run it in CR mode, which is the in-cluster production path."
 
 ```bash
-kubectl -n slurm get secret slurm-auth-slurm -o yaml | sed 's/namespace: slurm/namespace: slurm-jobs/' | kubectl apply -f -
+# The sed also strips the server-managed metadata: a Secret piped straight
+# from `get -o yaml` back into `apply` carries its source resourceVersion, and
+# re-running this (§2b repeats it) fails with "the object has been modified".
+# Reproduced live 2026-07-27.
+kubectl -n slurm get secret slurm-auth-slurm -o yaml \
+  | sed -e 's/namespace: slurm/namespace: slurm-jobs/' -e '/resourceVersion:/d' \
+        -e '/^  uid:/d' -e '/creationTimestamp:/d' \
+  | kubectl apply -f -
 kubectl port-forward -n slurm svc/slurm-restapi 6820:6820 &
 kubectl -n slurm exec slurm-controller-0 -c slurmctld -- scontrol token username=root lifespan=14400 | sed 's/SLURM_JWT=//' > /tmp/wm-slurm-token
 kubectl apply -f deploy/crd/workloadmixing-sample.yaml

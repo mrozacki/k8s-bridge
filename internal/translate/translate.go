@@ -59,6 +59,14 @@ const (
 	// worth keeping. The deadline has to be durable, and the JobSet is the only
 	// thing that survives.
 	RetainUntilAnnotation = "k8s-bridge.x-k8s.io/retain-until"
+	// NodesReleasedAnnotation marks that every dynamic Slurm node record for
+	// this JobSet has been deleted successfully, so the cleanup path can stop
+	// re-issuing those DELETEs. It only ever appears on a RETAINED JobSet:
+	// without retention the object is gone after one pass and there is nothing
+	// to remember. Found live 2026-07-27 — a retained JobSet re-ran the node
+	// loop on every tick of its window, which is 2 slurmrestd calls every
+	// pollInterval for an hour, against an API that shares slurmctld's lock.
+	NodesReleasedAnnotation = "k8s-bridge.x-k8s.io/nodes-released"
 
 	queueNameLabel     = "kueue.x-k8s.io/queue-name"
 	priorityClassLabel = "kueue.x-k8s.io/priority-class"

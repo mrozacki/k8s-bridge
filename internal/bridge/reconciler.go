@@ -849,6 +849,26 @@ func (b *Bridge) stampRetention(ctx context.Context, cfg *config.Config, js *job
 		"JobSet retained until %s for inspection (failedJobSetRetention); its Slurm job has already been failed", until)
 }
 
+// markNodesReleased records that this JobSet's dynamic Slurm node records are
+// gone, so later ticks of its retention window skip the delete loop entirely.
+// Best-effort: on failure the only cost is that the next tick retries the
+// deletes, which is exactly what happened before this marker existed.
+func (b *Bridge) markNodesReleased(ctx context.Context, js *jobsetv1alpha2.JobSet) {
+	if js.Annotations[translate.NodesReleasedAnnotation] == "true" {
+		return
+	}
+	patch := client.MergeFrom(js.DeepCopy())
+	if js.Annotations == nil {
+		js.Annotations = map[string]string{}
+	}
+	js.Annotations[translate.NodesReleasedAnnotation] = "true"
+	if err := b.kube.Patch(ctx, js, patch); err != nil {
+		delete(js.Annotations, translate.NodesReleasedAnnotation)
+		b.log.Debug("marking node records released failed (will retry the deletes next tick)",
+			"jobset", js.Name, "reason", err)
+	}
+}
+
 // retentionHolds reports whether js carries a retain-until stamp that has not
 // expired yet. An absent stamp means "delete now", which is what every JobSet
 // the failure branch never touched carries — so the normal completed-job
@@ -1013,10 +1033,32 @@ func (b *Bridge) cleanupFinishedJobs(ctx context.Context, cfg *config.Config, sn
 		// Delete the Slurm node records first (their names are deterministic,
 		// see translate.NodeNames), then the JobSet. Node deletion errors are
 		// tolerated: the record may already be gone.
-		nTasks := b.jobSetParallelism(js)
-		for _, node := range translate.NodeNames(id, nTasks) {
-			if err := b.slurm.DeleteNode(ctx, node); err != nil {
-				b.log.Info("deleting slurm node record (may be already gone)", "node", node, "reason", err)
+		// Node cleanup runs on every pass EXCEPT for a retained JobSet whose
+		// records are already confirmed gone. Without that exception a retained
+		// object re-issues these DELETEs every tick for its whole window —
+		// found live 2026-07-27, and slurmrestd shares slurmctld's lock, so it
+		// is not free. Retrying while a delete still FAILS is kept on purpose:
+		// live, the first attempts lost a race with a job in COMPLETING ("nodes
+		// are busy") and only succeeded a few ticks later.
+		if js.Annotations[translate.NodesReleasedAnnotation] != "true" {
+			nTasks := b.jobSetParallelism(js)
+			clean := true
+			for _, node := range translate.NodeNames(id, nTasks) {
+				if err := b.slurm.DeleteNode(ctx, node); err != nil {
+					b.log.Info("deleting slurm node record (may be already gone)", "node", node, "reason", err)
+					clean = false
+				}
+			}
+			// Stop retrying once the deletes came back clean, or once the Slurm
+			// job is gone from slurmctld entirely — a purged job takes its
+			// dynamic node records with it, so there is nothing left to delete.
+			// The second condition is what actually ends the loop in practice:
+			// slurmrestd reports an unknown node as 422/2018, not 404, so a
+			// record that is already gone cannot be told from a real failure by
+			// status code alone. Only persisted for a retained JobSet — without
+			// retention this object is deleted a few lines below anyway.
+			if (clean || !found) && b.retentionHolds(js) {
+				b.markNodesReleased(ctx, js)
 			}
 		}
 		// Retention gate, deliberately placed AFTER node cleanup: the Slurm-side
