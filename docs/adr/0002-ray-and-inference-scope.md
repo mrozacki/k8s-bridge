@@ -52,3 +52,32 @@ quota/priority domain.
 - Open question to resolve experimentally: how serving workloads participate
   in quota (Kueue plain-Pod integration vs. plain scheduling with
   PriorityClasses) — a topic for a future ADR once we have data.
+
+## Status update, 2026-07-27 — implementation maturity, not scope
+
+**The scope decisions above are unchanged.** `RayCluster` remains in scope and
+`RayJob` remains out of it, for exactly the reasons given.
+
+What changed is a judgement about the *implementation*: `ray-bridge`, the
+controller that automates inner-workload admission (ADR-0006, ADR-0013), is
+now labelled **experimental** in the README and in its chart, and Ray has been
+removed from `docs/tutorial.md` and from the narrated demo runbook
+(`experiments/DEMO.md`).
+
+Reason (owner decision): ray-bridge has been validated only at small scale on
+`kind`. Every other mechanism those two documents walk has been exercised live
+on GKE, repeatedly. Presenting them side by side implied a maturity ray-bridge
+has not earned, and a newcomer's first exposure to the project should not be a
+mechanism we would not yet run ourselves.
+
+Explicitly reversible, and no code changes: the controller, its chart, its
+configuration reference, and `experiments/10-ray-bridge/` all remain in the
+repository and in the release. Re-add Ray to the reader-facing documents once
+ray-bridge has a live multi-node validation on par with k8s-bridge's.
+
+Worth recording because a *different* proposal was rejected in the same batch:
+an external report suggested reframing the docs around `RayJob` instead. That
+would have inverted decision 2 above — `RayJob` is out of scope **because** it
+is already Kueue-native, so there is nothing for a bridge to do. Removing Ray
+on maturity grounds and reframing it around the wrong abstraction are different
+actions with different consequences; only the first was taken.

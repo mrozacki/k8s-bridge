@@ -49,11 +49,19 @@ Two controllers apply this pattern:
 - **`k8s-bridge`** (Slurm): watches held Slurm jobs via the Slurm REST API,
   translates each into a JobSet of `slurmd` pods that register as *dynamic Slurm
   nodes*, and releases the job onto them once Kueue admits the JobSet.
-- **`ray-bridge`** (Ray): watches inner workloads of a shared, long-lived
-  `RayCluster` (`RayJob`s targeting it via `clusterSelector`), stands up a
-  Kueue-admitted JobSet of dedicated Ray workers advertising a per-job custom
-  resource, and gates the job on that resource so it cannot run until Kueue
-  admits the workers (the *pin-gate* model).
+- **`ray-bridge`** (Ray) — **experimental**: watches inner workloads of a
+  shared, long-lived `RayCluster` (`RayJob`s targeting it via
+  `clusterSelector`), stands up a Kueue-admitted JobSet of dedicated Ray
+  workers advertising a per-job custom resource, and gates the job on that
+  resource so it cannot run until Kueue admits the workers (the *pin-gate*
+  model).
+
+  > Validated only at small scale on `kind` — never on a real multi-node
+  > cluster — and deliberately excluded from the tutorial and the demo runbook
+  > (owner decision, 2026-07-27). The design is settled (ADR-0013); the
+  > implementation's maturity is not. Do not deploy it expecting the same
+  > confidence as `k8s-bridge`, which has been exercised live on GKE across
+  > many sessions.
 
 Both are built on controller-runtime and share a common admission library, so a
 Slurm JobSet and a Ray worker JobSet are just two Kueue workloads competing in
@@ -64,7 +72,7 @@ the same ClusterQueue.
 | Workload | How it participates | Status |
 |----------|---------------------|--------|
 | Slurm batch jobs | Translated to JobSets by `k8s-bridge` | Prototype |
-| Ray inner workloads (jobs in a shared `RayCluster`) | Dedicated Kueue-admitted workers per job, gated by a Ray custom resource (`ray-bridge`) | Prototype |
+| Ray inner workloads (jobs in a shared `RayCluster`) | Dedicated Kueue-admitted workers per job, gated by a Ray custom resource (`ray-bridge`) | **Experimental** — `kind` only |
 | Kubernetes batch (Job/JobSet) | Admitted by Kueue directly | Native |
 | Standalone `RayJob` (own cluster) | Already Kueue-integrated; no bridge needed | Native |
 | Serving / inference | Kueue admits capacity at high priority; autoscalers own replica counts | Native |

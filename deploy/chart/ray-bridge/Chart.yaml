@@ -1,6 +1,6 @@
 apiVersion: v2
 name: ray-bridge
-description: Kueue-centric admission for KubeRay RayCluster inner workloads (sibling of k8s-bridge)
+description: "EXPERIMENTAL — Kueue-centric admission for KubeRay RayCluster inner workloads (sibling of k8s-bridge). Validated at small scale on kind only, never on a real multi-node cluster."
 type: application
 version: 0.3.1
 appVersion: "v0.3.1"

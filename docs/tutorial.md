@@ -1,14 +1,27 @@
-# Tutorial: mixing Slurm, Kubernetes, and Ray workloads with k8s-bridge
+# Tutorial: mixing Slurm and Kubernetes workloads with k8s-bridge
 
 This tutorial walks you through standing up k8s-bridge on a small GKE
 cluster and exercising it end to end: submitting a plain Slurm job and
 watching it get admitted through Kueue, sharing quota between Slurm and
-native Kubernetes workloads, seeing priority and preemption in action, and
-mixing in Ray. It follows the same technical path as
+native Kubernetes workloads, and seeing priority and preemption in action.
+It follows the same technical path as
 [`experiments/DEMO.md`](../experiments/DEMO.md) (the project's narrated
 validation runbook) but is written to be worked through step by step by
 someone new to the project, with explanations of the Kubernetes and Kueue
 concepts as they come up.
+
+> **Ray is deliberately not covered here.** `RayCluster` admission through
+> Kueue is in scope for the project ([ADR-0002](adr/0002-ray-and-inference-scope.md)),
+> but the component that automates it — `ray-bridge` — is **experimental**:
+> validated only at small scale on `kind`, not on a real multi-node cluster,
+> and not exercised by this tutorial's live validation. Walking a newcomer
+> through a mechanism at that maturity teaches the wrong thing about how
+> settled it is. If you want to explore it anyway, it lives in
+> [`experiments/10-ray-bridge/`](../experiments/10-ray-bridge/README.md) with
+> its own runnable `kind` setup, and the manual version of the mechanism is
+> in [`experiments/03-open-items/`](../experiments/03-open-items/README.md).
+> KubeRay is still installed by the bring-up script below, because the rest
+> of the stack expects it and other experiments use it.
 
 ## What you'll build
 
@@ -26,7 +39,6 @@ of nodes. By the end you will have:
 - submitted a plain Kubernetes `Job` and a Slurm job into the **same**
   `ClusterQueue` and watched Kueue treat them identically;
 - seen a latency-sensitive serving deployment preempt batch capacity;
-- run a Ray workload through the same admission path;
 - deployed the bridge into the cluster with Helm, the way a real site runs
   it, rather than only as a binary on your laptop; and
 - read and understood the `WorkloadMixing` custom resource that configures
@@ -55,10 +67,10 @@ in section 4. Several sections interleave the two, so keep both open:
 Cluster: this tutorial **runs on GKE**, not `kind`. Slinky's Slurm stack
 needs real nodes to register dynamic `slurmd` workers against, and the
 topology and autoscaling sections exercise real GKE behavior. There is
-currently no `kind` path for this full mixed-workload walkthrough — if you
-only want to explore the Ray side on `kind`, see
-[`experiments/10-ray-bridge/README.md`](../experiments/10-ray-bridge/README.md)
-instead. A full run here uses small `e2-standard-4` spot nodes.
+currently no `kind` path for this full mixed-workload walkthrough — the
+experimental Ray side is the one part that does have one, in
+[`experiments/10-ray-bridge/README.md`](../experiments/10-ray-bridge/README.md).
+A full run here uses small `e2-standard-4` spot nodes.
 
 Before you start, it's worth skimming:
 
@@ -209,7 +221,7 @@ kubectl -n slurm-jobs patch workloadmixing playground --type=merge \
   -p '{"spec":{"slurmRestURL":"http://127.0.0.1:6820","allowInsecureHTTP":true,"slurmTokenFile":"/tmp/wm-slurm-token"}}'
 make build
 # --pprof-addr is off by default (heap profiles contain the Slurm token).
-# Pass it now if you plan to run the optional scale drill in section 15.
+# Pass it now if you plan to run the optional scale drill in section 14.
 ./bin/k8s-bridge --workloadmixing slurm-jobs/playground --pprof-addr 127.0.0.1:6060 &
 kubectl get workloadmixing -n slurm-jobs playground -o yaml | grep -A3 conditions   # Ready=True
 ```
@@ -492,7 +504,7 @@ This is the core loop: a researcher submits a completely ordinary Slurm
 job, with no special flags, and the whole Kubernetes admission chain
 happens invisibly underneath.
 
-Open the Slurm pane now and **leave it open** — sections 5, 7 and 14 all
+Open the Slurm pane now and **leave it open** — sections 5, 7 and 13 all
 come back to it:
 
 ```bash
@@ -834,69 +846,7 @@ Further reading: `experiments/04-serving-admission/README.md`.
 
 ---
 
-## 12. Ray workloads
-
-Ray fits into this picture in three different ways. Worth trying each one
-in turn to see the distinction.
-
-```bash
-# 1) shared cluster: infrastructure, deliberately NOT queued through Kueue
-kubectl apply -f experiments/03-open-items/manifests/ray-shared-cluster.yaml
-
-# 2) the admission gap: a raw job into the shared cluster bypasses Kueue.
-#    An inner RayJob whose entrypointResources require wm-job-<id> instead
-#    cannot run until a Kueue-admitted dedicated worker advertises it
-#    (KubeRay forbids spec.suspend here, hence the pin-based approach below)
-kubectl apply -f experiments/03-open-items/manifests/ray-inner-job.yaml
-
-# 3) the mechanism, by hand: a Kueue-gated dynamic worker, pinned to
-#    one task via a custom resource
-kubectl run pinned-worker --image=rayproject/ray:2.46.0 --labels="kueue.x-k8s.io/queue-name=team-a" \
-  --overrides='{"spec":{"containers":[{"name":"pinned-worker","image":"rayproject/ray:2.46.0","command":["bash","-c","ray start --address=shared-ray-head-svc.default.svc.cluster.local:6379 --num-cpus=1 --resources='"'"'{\"wm-job-demo\": 1}'"'"' --block"],"resources":{"requests":{"cpu":"1","memory":"2Gi"},"limits":{"cpu":"1","memory":"2Gi"}}}]}}' --restart=Never
-# then a Ray task with resources={'wm-job-demo':1} runs exactly there
-
-# 4) RayService: inference as one elastic unit, outside Kueue, autoscaling
-kubectl apply -f experiments/03-open-items/manifests/ray-service.yaml   # autoscaling 1->3
-```
-
-**What just happened, step by step:**
-
-1. A shared, long-lived `RayCluster` is infrastructure, not a queued unit
-   of work — it deliberately carries no Kueue queue label.
-2. Submitting a raw inner job straight into that shared cluster bypasses
-   Kueue admission entirely. An inner `RayJob` that instead declares
-   `entrypointResources` requiring a specific pinned resource can't run
-   until a matching worker exists and is admitted — that's the gap the
-   next step closes by hand.
-3. A dynamic worker pod, labeled with a Kueue queue name so it *is* a real
-   unit of Kueue admission, advertises a custom Ray resource
-   (`wm-job-demo`) tied to one specific job. A Ray task requesting that
-   resource lands specifically on that worker, and nowhere else — this
-   is the mechanism a dedicated Ray-side controller (`ray-bridge`,
-   covered in `experiments/10-ray-bridge/`) automates end to end, so a
-   user submitting an inner RayJob doesn't have to do this by hand.
-4. A `RayService` is a different shape again: an elastic serving unit that
-   autoscales its own replica count and sits outside Kueue's admission
-   accounting altogether — appropriate for latency-sensitive serving,
-   less so for queued batch-style admission.
-
-**What to look for:** `kubectl get raycluster,rayservice -A` — note that
-`shared-ray` carries no `kueue.x-k8s.io/queue-name` label (the cluster is
-infrastructure), while `pinned-worker` does (the individual unit of
-admission is the worker pod, pinned to one Ray task by a custom resource
-Ray itself understands).
-
-**Expected result:** the shared `RayCluster` and `RayService` run outside
-Kueue's admission accounting; the pinned worker is a real `Workload` object
-in `team-a`'s queue, and the resource-tagged Ray task lands specifically on
-it, not on any other worker.
-
-Further reading: `experiments/10-ray-bridge/README.md` (the automated
-version of this mechanism, runnable on `kind`), `experiments/03-open-items/README.md`.
-
----
-
-## 13. Optional: DWS queued provisioning
+## 12. Optional: DWS queued provisioning
 
 Queued provisioning inverts the usual failure mode: instead of a workload
 failing because capacity is absent, Kueue asks GKE *for* capacity and holds
@@ -908,7 +858,7 @@ that does not exist yet.
 > `g2-standard-4` carries an NVIDIA L4, billed as GPU. Everything else in
 > this tutorial runs on spot CPU nodes with *simulated* accelerators
 > (section 5). Skip this on a first pass, and if you do run it, make sure
-> section 17's teardown happens even if you stop halfway.
+> section 16's teardown happens even if you stop halfway.
 
 **13a. The node pool.** `--enable-queued-provisioning` is the load-bearing
 flag — `--flex-start` alone is not enough for the Cluster Autoscaler to
@@ -996,7 +946,7 @@ Further reading: `experiments/08-ccc-dws/README.md`.
 
 ---
 
-## 14. Failure handling: what happens when a JobSet dies
+## 13. Failure handling: what happens when a JobSet dies
 
 Failure handling matters as much as the happy path. If a JobSet dies — it
 blows a deadline, or can never pull its image before the Slurm nodes
@@ -1079,7 +1029,7 @@ Further reading: [`docs/operations.md`](operations.md), the runbook titled
 
 ---
 
-## 15. Optional: a scale drill
+## 14. Optional: a scale drill
 
 Worth trying once you're comfortable with the basics, to see what the
 bridge looks like under load rather than a toy queue of one or two jobs.
@@ -1109,7 +1059,7 @@ Further reading: `experiments/07-scale/README.md`.
 
 ---
 
-## 16. Resetting between runs
+## 15. Resetting between runs
 
 To re-run from section 4 onward without tearing down the whole cluster:
 
@@ -1124,6 +1074,8 @@ kubectl delete jobsets -n slurm-jobs --all --ignore-not-found
 # clear ad-hoc Kubernetes workloads created during the mixing/serving/CCC sections
 kubectl delete jobs -n default -l 'kueue.x-k8s.io/queue-name' --ignore-not-found
 kubectl delete deployment queued-inference sample-inference -n default --ignore-not-found
+# only needed if you went through experiments/10-ray-bridge or 03-open-items;
+# this tutorial creates no Ray objects
 kubectl delete raycluster,rayservice -n default --all --ignore-not-found
 kubectl delete pod pinned-worker -n default --ignore-not-found
 
@@ -1145,7 +1097,7 @@ If quota looks stuck (a `ClusterQueue` shows usage but no matching
 
 ---
 
-## 17. Tearing down
+## 16. Tearing down
 
 **Run this whenever you're done, whether that's at the very end or just
 pausing for the day.** Leftover clusters and disks are easy to forget
@@ -1167,7 +1119,7 @@ gcloud compute forwarding-rules list
 gcloud container clusters list   # should be empty
 ```
 
-If section 13 created a standalone node pool (`dws-gpu-qp` — **GPU nodes,
+If section 12 created a standalone node pool (`dws-gpu-qp` — **GPU nodes,
 the one genuinely expensive resource in this tutorial**) or Custom
 Compute Class node pools, confirm they were deleted along with the cluster
 (`ComputeClass`-managed pools are GKE-managed and go with the cluster;
@@ -1180,26 +1132,26 @@ leftover resource first.
 
 ---
 
-## 18. Troubleshooting
+## 17. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
 | `no matches for kind "ResourceFlavor"` during bring-up | steps 01/02 never ran — almost always `PROJECT_ID` unset. Section 1 now chains with `&&` so the run stops at the real cause, and `03-configure-queues.sh` preflights the Kueue CRDs itself |
 | the bridge prints `connection refused` on :6820 forever | the backgrounded `port-forward` died silently. Re-run it and wait for `port-forward up` (section 2) |
-| `bash: ID: No such file or directory`, or a stray `syntax error` | you pasted an `<ID>` placeholder — `<` and `>` are shell redirections. Sections 7 and 14 capture the id instead |
+| `bash: ID: No such file or directory`, or a stray `syntax error` | you pasted an `<ID>` placeholder — `<` and `>` are shell redirections. Sections 7 and 13 capture the id instead |
 | Helm-deployed bridge is Running and healthy but nothing happens | `configSource` is still `file` (the chart default), so `WorkloadMixing` CRs are ignored — reinstall with `--set configSource=cr` (section 2b) |
 | bridge's `slurmd` pods stuck in `ContainerCreating` / `FailedMount` | `slurm-auth-slurm` is missing from the bridge's namespace; Secrets are namespace-scoped and the bridge does not copy them (section 2b, step 1) |
 | jobs stuck in `JobHeldUser`, bridge logs gone, terminal was closed | the section-2 binary died with your shell. That's the development workflow — section 2b runs it in the cluster |
 | two bridges, only one doing anything | the local binary and the chart are both running and share the `k8s-bridge-leader` Lease; check `holderIdentity` and stop one |
 | every job Pending on a hand-built cluster | node allocatable CPU is below the 1000m the tutorial requests per task (`e2-medium` is ~940m) — use `e2-standard-4` |
-| DWS request says `PROVISIONED` but GPU pods stay `Pending` | the NVIDIA driver DaemonSet hasn't finished on the new node, so `nvidia.com/gpu` isn't advertised yet — wait rather than debug the bridge (section 13) |
+| DWS request says `PROVISIONED` but GPU pods stay `Pending` | the NVIDIA driver DaemonSet hasn't finished on the new node, so `nvidia.com/gpu` isn't advertised yet — wait rather than debug the bridge (section 12) |
 | everything pending, "no topology domains" | you forgot the node labels (section 1) |
 | jobs un-releasable, "priority request forwarded" on release | old lua plugin: `hold(0)`/`release(INFINITE)` must pass through |
 | GPU node drained, "count reported lower" | `gres.conf` must be `Name=gpu File=/dev/null` (count-only alone is not enough for the gpu type) and mounted into the slurmd conf-cache |
 | autoscaler deletes "racks" | pin the pool: set `min-nodes` = `num-nodes` |
 | flex-start create fails on reservations | add `--reservation-affinity=none` |
-| DWS provisioning request `Failed` | GKE rejects CPU-only DWS Flex today — accelerators required; use Custom Compute Classes (section 13 alternative) instead |
-| JobSet dead but Slurm job still pending | the bridge fails the job on a JobSet `Failed` condition (section 14) — if it doesn't, check the bridge is ticking (section 2) and watch the `k8s_bridge_jobs_failed_total` metric |
+| DWS provisioning request `Failed` | GKE rejects CPU-only DWS Flex today — accelerators required; use Custom Compute Classes (section 12 alternative) instead |
+| JobSet dead but Slurm job still pending | the bridge fails the job on a JobSet `Failed` condition (section 13) — if it doesn't, check the bridge is ticking (section 2) and watch the `k8s_bridge_jobs_failed_total` metric |
 | `sbatch` hangs / no comment update | check the bridge process is running and its `Ready` condition (section 2) — the bridge being down is safe, but nothing progresses until it's back |
 | bridge stuck, no ticks at all, no obvious error | check leader election (section 3a) — a second replica or a stuck Lease holder means this pod never wins and never starts running |
 | config change (`WorkloadMixing` patch) has no visible effect | confirm CRD mode is active (`--workloadmixing` set); file mode never hot-reloads (section 3d) — it needs a restart, or a chart `checksum/config`-triggered rollout instead |

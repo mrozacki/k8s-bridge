@@ -77,14 +77,32 @@ breaking changes; the one new API field defaults to the previous behaviour.
 - Troubleshooting tables in both documents gained a row per finding, keyed on
   the symptom the reader actually sees.
 
+### Changed
+- **`ray-bridge` is now labelled experimental**, and Ray has been removed from
+  `docs/tutorial.md` and from the narrated demo runbook. The scope decision in
+  ADR-0002 is **unchanged** — `RayCluster` admission through Kueue is still in
+  scope, `RayJob` is still out of it — but the controller that automates it has
+  only ever been validated at small scale on `kind`, while every other
+  mechanism those two documents walk has been exercised live on GKE. Showing
+  them side by side implied a maturity ray-bridge has not earned.
+
+  **Nothing was removed from the release:** the `ray-bridge` binary, chart,
+  configuration reference, and `experiments/10-ray-bridge/` are all still here
+  and still installable. This is a documentation and labelling change, and it
+  is reversible once ray-bridge has a live multi-node validation. See the
+  2026-07-27 status update appended to ADR-0002.
+
 ### Notes
 - Two reported items were deliberately **not** acted on. "Frame Ray around
   `RayJob` rather than `RayCluster`" inverts ADR-0002 — `RayJob` is out of
   scope precisely because it is already Kueue-native, while `RayCluster` is in
   scope because its shared-cluster admission gap is the problem this project
-  exists to close. "Pin the cluster to `e2-standard-4`" was already the case in
-  `00-env.sh`; the real concern underneath it (allocatable CPU below one full
-  core on a hand-built cluster) is now a preflight warning instead.
+  exists to close. (Ray *was* subsequently dropped from the tutorial, but on
+  maturity grounds and without touching the scope decision — see **Changed**
+  above. The two are different actions with different consequences.) "Pin the
+  cluster to `e2-standard-4`" was already the case in `00-env.sh`; the real
+  concern underneath it (allocatable CPU below one full core on a hand-built
+  cluster) is now a preflight warning instead.
 - Section 13 was **not** executed in this release's validation — it is the only
   part of the tutorial that provisions GPU nodes. Everything past
   `ProvisioningRequest: Accepted` remains unverified.
