@@ -197,6 +197,24 @@ type Config struct {
 	// SlurmdTimeout remains the backstop for evictions the bridge cannot see
 	// (bridge down during the eviction, a node lost without a Kueue event).
 	DrainOnPreemption bool `json:"drainOnPreemption,omitempty"`
+	// FailedJobSetRetention keeps a JobSet that outlived its Slurm job around
+	// for this long instead of deleting it in the same tick that fails the job
+	// (D1/TC-D3). Zero — the default — preserves the original behaviour of
+	// deleting immediately.
+	//
+	// Why it exists: the failure path is the one an operator most wants to look
+	// at afterwards, and it was the one that erased its own evidence. `kubectl
+	// get jobset -n slurm-jobs` and `kubectl get events --field-selector
+	// reason=JobSetFailed` both came back empty moments after a job failed,
+	// which reads as "failure handling is broken" rather than "failure handling
+	// worked and then tidied up". Retention makes the post-mortem possible
+	// without changing what the bridge does to the Slurm job.
+	//
+	// Retaining is cheap: only a JobSet that has already reached a terminal
+	// condition (Failed, or the TC-D3 Completed twin) is ever retained, so its
+	// pods are finished and Kueue has already released its quota. It holds an
+	// API object, not capacity.
+	FailedJobSetRetention Duration `json:"failedJobSetRetention,omitempty"`
 	// CreateWorkers bounds the worker pool used to parallelize ensureJobSet
 	// calls across held jobs (P5: found sequential creates
 	// dominating the first tick of a burst). Defaults to 8. The pool's
@@ -372,8 +390,24 @@ func (c *Config) Validate() error {
 	if c.SlurmRequestTimeout.Duration < time.Second || c.SlurmRequestTimeout.Duration > 10*time.Minute {
 		return fmt.Errorf("slurmRequestTimeout %s must be between 1s and 10m", c.SlurmRequestTimeout.Duration)
 	}
+	// Same reasoning as OrphanGraceTicks above: a negative retention is a config
+	// error, not a request for the zero default. The upper bound is a typo rail
+	// — retained JobSets are inert, but they are still API objects, and
+	// "30d" typed as "30" (nanoseconds) or fat-fingered into years should not
+	// silently become an unbounded object leak.
+	if c.FailedJobSetRetention.Duration < 0 {
+		return fmt.Errorf("failedJobSetRetention must not be negative")
+	}
+	if c.FailedJobSetRetention.Duration > maxFailedJobSetRetention {
+		return fmt.Errorf("failedJobSetRetention %s must not exceed %s", c.FailedJobSetRetention.Duration, maxFailedJobSetRetention)
+	}
 	return nil
 }
+
+// maxFailedJobSetRetention caps how long a failed JobSet may be kept for
+// post-mortem inspection. Seven days is well past any realistic debugging
+// window and keeps a typo from turning retention into an object leak.
+const maxFailedJobSetRetention = 7 * 24 * time.Hour
 
 // ValidateImageAllowed reports whether image matches one of the allowed
 // prefixes. An empty allowlist is treated as "allow all" by the caller, so this

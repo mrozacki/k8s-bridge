@@ -91,6 +91,16 @@ spec:
                 type: boolean
               enablePrioritySync:
                 type: boolean
+              failedJobSetRetention:
+                description: |-
+                  how long to keep a JobSet that outlived its Slurm job (D1/TC-D3) before
+                  deleting it, so the failure can still be inspected with kubectl. Go
+                  duration, e.g. 1h; empty or 0 (the default) deletes immediately, as
+                  before. Only JobSets that reached a terminal condition are ever retained,
+                  so their pods are finished and their Kueue quota already released — this
+                  holds an API object, not capacity. Capped at 7d by the controller.
+                pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+                type: string
               localQueue:
                 maxLength: 253
                 type: string

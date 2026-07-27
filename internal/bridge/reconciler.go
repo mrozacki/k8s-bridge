@@ -814,6 +814,63 @@ func (b *Bridge) failJobForDeadJobSet(ctx context.Context, job *slurm.Job, js *j
 	return cancelErr == nil
 }
 
+// stampRetention records, on the JobSet itself, the deadline before which
+// cleanup must not delete it. Called only from the failure branch of
+// cleanupFinishedJobs, and a no-op when retention is disabled (the default) or
+// when a previous tick already stamped this object — the window is never
+// extended, so a JobSet that keeps failing its cancel retry cannot creep past
+// its original deadline.
+//
+// Best-effort by design: if the patch fails the annotation is dropped again and
+// the JobSet is cleaned up exactly as it was before retention existed. A
+// debugging aid must not become a new way for cleanup to get stuck.
+func (b *Bridge) stampRetention(ctx context.Context, cfg *config.Config, js *jobsetv1alpha2.JobSet) {
+	if cfg.FailedJobSetRetention.Duration <= 0 {
+		return
+	}
+	if _, already := js.Annotations[translate.RetainUntilAnnotation]; already {
+		return
+	}
+	until := time.Now().Add(cfg.FailedJobSetRetention.Duration).UTC().Format(time.RFC3339)
+	patch := client.MergeFrom(js.DeepCopy())
+	if js.Annotations == nil {
+		js.Annotations = map[string]string{}
+	}
+	js.Annotations[translate.RetainUntilAnnotation] = until
+	if err := b.kube.Patch(ctx, js, patch); err != nil {
+		delete(js.Annotations, translate.RetainUntilAnnotation)
+		b.log.Warn("stamping JobSet retention failed, cleaning up immediately instead",
+			"jobset", js.Name, "error", err)
+		return
+	}
+	b.log.Info("retaining failed JobSet for post-mortem inspection",
+		"jobset", js.Name, "until", until)
+	b.eventf(js, corev1.EventTypeNormal, "RetainedForInspection",
+		"JobSet retained until %s for inspection (failedJobSetRetention); its Slurm job has already been failed", until)
+}
+
+// retentionHolds reports whether js carries a retain-until stamp that has not
+// expired yet. An absent stamp means "delete now", which is what every JobSet
+// the failure branch never touched carries — so the normal completed-job
+// cleanup path is unaffected by this feature.
+//
+// An unparseable stamp is treated as expired: a corrupt annotation (hand-edited,
+// or written by a future version with a different format) must not pin an object
+// in the cluster forever.
+func (b *Bridge) retentionHolds(js *jobsetv1alpha2.JobSet) bool {
+	raw, ok := js.Annotations[translate.RetainUntilAnnotation]
+	if !ok {
+		return false
+	}
+	until, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		b.log.Warn("JobSet carries an unparseable retain-until annotation, cleaning it up normally",
+			"jobset", js.Name, "value", raw)
+		return false
+	}
+	return time.Now().Before(until)
+}
+
 // jobSetParallelism reports how many pods (and thus dynamic Slurm node records)
 // a JobSet has. A managed JobSet with no ReplicatedJobs (hand-edited or mutated
 // by something else) must not panic the loop indexing ReplicatedJobs[0]
@@ -908,6 +965,13 @@ func (b *Bridge) cleanupFinishedJobs(ctx context.Context, cfg *config.Config, sn
 		// cleanup path used for completed jobs. A live (non-terminal)
 		// JobSet must NOT take this branch.
 		if found && !job.IsTerminal() && (jobSetFailed(js) || jobSetCompleted(js)) {
+			// Stamp the retention deadline HERE — this is the only branch that
+			// knows this JobSet is the failure case. By the next tick the Slurm
+			// job is cancelled (or purged from slurmctld) and this branch is
+			// never taken again, so a deadline computed later could not tell a
+			// failed job's leftovers from an ordinary completed job's.
+			// No-op when retention is disabled (the default).
+			b.stampRetention(ctx, cfg, js)
 			if !b.failJobForDeadJobSet(ctx, job, js) {
 				// CancelJob itself failed (e.g. slurmrestd unreachable): do
 				// NOT fall through to deleting the JobSet. The JobSet is the
@@ -954,6 +1018,13 @@ func (b *Bridge) cleanupFinishedJobs(ctx context.Context, cfg *config.Config, sn
 			if err := b.slurm.DeleteNode(ctx, node); err != nil {
 				b.log.Info("deleting slurm node record (may be already gone)", "node", node, "reason", err)
 			}
+		}
+		// Retention gate, deliberately placed AFTER node cleanup: the Slurm-side
+		// node records must go immediately either way (a retained record would
+		// leave slurmctld advertising capacity that no longer exists), while the
+		// JobSet — the thing an operator wants to inspect — is what gets kept.
+		if b.retentionHolds(js) {
+			continue
 		}
 		if err := b.kube.Delete(ctx, js); err != nil && !apierrors.IsNotFound(err) {
 			b.log.Error("deleting JobSet failed, will retry next tick", "jobset", js.Name, "error", err)

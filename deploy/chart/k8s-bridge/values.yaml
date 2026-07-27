@@ -312,6 +312,14 @@ config:
   # Defaults to 8 when omitted; the client-go QPS/Burst ceiling below still
   # bounds actual API throughput regardless of pool size.
   # createWorkers: 8
+  # Keep a JobSet that outlived its Slurm job (the D1/TC-D3 failure path) for
+  # this long instead of deleting it in the same tick that fails the job, so the
+  # failure stays inspectable with `kubectl get jobset` / `kubectl describe`.
+  # Empty (the default) deletes immediately, exactly as before this knob existed.
+  # Only JobSets that already reached a terminal condition are ever retained, so
+  # their pods are finished and Kueue has released their quota — this holds an
+  # API object, not capacity. The controller rejects anything above 7d.
+  # failedJobSetRetention: "1h"
   partitionMappings:
     - partitionName: "mixing"
       workloadPriorityClass: "normal-priority"

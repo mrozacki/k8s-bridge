@@ -48,6 +48,17 @@ const (
 	// ID". An annotation (not a label) because the value is never selected
 	// on and a raw unix timestamp is not a great label value anyway.
 	SlurmSubmitTimeAnnotation = "k8s-bridge.x-k8s.io/slurm-submit-time"
+	// RetainUntilAnnotation carries an RFC3339 timestamp before which a JobSet
+	// that outlived its Slurm job must NOT be garbage-collected. It is stamped
+	// only on the failure path (a JobSet that turned terminal while its Slurm
+	// job had not), and only when config.FailedJobSetRetention is positive.
+	//
+	// It lives on the object rather than in bridge memory on purpose: by the
+	// tick AFTER the failure the Slurm job is cancelled (or purged), so nothing
+	// in that later tick's state can still tell that this JobSet is the one
+	// worth keeping. The deadline has to be durable, and the JobSet is the only
+	// thing that survives.
+	RetainUntilAnnotation = "k8s-bridge.x-k8s.io/retain-until"
 
 	queueNameLabel     = "kueue.x-k8s.io/queue-name"
 	priorityClassLabel = "kueue.x-k8s.io/priority-class"

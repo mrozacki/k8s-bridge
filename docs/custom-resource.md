@@ -128,6 +128,7 @@ released onto them. The `slurmd` block describes those pods:
 | `cancelOrphanedJobs` | Cancel a released Slurm job whose JobSet has disappeared. **Off by default**: `scancel` is irreversible and the trigger is the *absence* of a JobSet — which a mis-scoped informer cache or lost RBAC looks exactly like. Opt in only once the deployment's cache scope is trusted. |
 | `orphanGraceTicks` | Consecutive ticks a job must be seen without its JobSet before `cancelOrphanedJobs` acts (default 3). |
 | `drainOnPreemption` | Proactively delete a preempted job's dynamic-node records on Kueue eviction instead of waiting out Slurm's `SlurmdTimeout`. Off by default; the timeout remains the backstop. |
+| `failedJobSetRetention` | How long to keep a JobSet that outlived its Slurm job, so the failure stays inspectable with `kubectl`. Go duration (e.g. `1h`); empty or `0` — the default — deletes it in the same tick that fails the job, as before. Only JobSets that already reached a terminal condition are ever retained, so their pods are finished and their Kueue quota released: this holds an API object, not capacity. Capped at `7d`. |
 | `topology.requiredLevel` | Node-label key applied as `podset-required-topology` when a Slurm job requests switch locality (`--switches=N`). Empty disables translation. |
 | `topology.preferredLevel` | Node-label key applied as `podset-preferred-topology` to every other bridge job (best-effort gang locality). |
 

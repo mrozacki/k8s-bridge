@@ -63,6 +63,10 @@ func FromCR(wm *v1alpha1.WorkloadMixing) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	failedJobSetRetention, err := parseCRDuration("failedJobSetRetention", spec.FailedJobSetRetention)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &config.Config{
 		SlurmRestURL:               spec.SlurmRestURL,
@@ -80,6 +84,7 @@ func FromCR(wm *v1alpha1.WorkloadMixing) (*config.Config, error) {
 		CancelOrphanedJobs:         spec.CancelOrphanedJobs,
 		OrphanGraceTicks:           spec.OrphanGraceTicks,
 		DrainOnPreemption:          spec.DrainOnPreemption,
+		FailedJobSetRetention:      failedJobSetRetention,
 		CreateWorkers:              spec.CreateWorkers,
 		Slurmd: config.Slurmd{
 			Image:           spec.Slurmd.Image,

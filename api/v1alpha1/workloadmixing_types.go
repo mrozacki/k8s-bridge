@@ -221,6 +221,15 @@ type WorkloadMixingSpec struct {
 	// would requeue a healthy job (recoverable). SlurmdTimeout stays the backstop.
 	DrainOnPreemption bool `json:"drainOnPreemption,omitempty"`
 
+	// how long to keep a JobSet that outlived its Slurm job (D1/TC-D3) before
+	// deleting it, so the failure can still be inspected with kubectl. Go
+	// duration, e.g. 1h; empty or 0 (the default) deletes immediately, as
+	// before. Only JobSets that reached a terminal condition are ever retained,
+	// so their pods are finished and their Kueue quota already released — this
+	// holds an API object, not capacity. Capped at 7d by the controller.
+	// +kubebuilder:validation:Pattern=`^[0-9]+(ns|us|µs|ms|s|m|h)$`
+	FailedJobSetRetention string `json:"failedJobSetRetention,omitempty"`
+
 	// PartitionMappings lists the Slurm partitions under workload-mixing
 	// management and their Kueue priority mapping. The 256 ceiling is a
 	// sanity rail, far above any real partition count.

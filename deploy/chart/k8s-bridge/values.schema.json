@@ -279,6 +279,11 @@
         "enablePrioritySync": {
           "type": "boolean"
         },
+        "failedJobSetRetention": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "description": "How long to keep a JobSet that outlived its Slurm job, so the failure stays inspectable. Empty or 0 deletes it immediately (the default); the controller caps this at 7d."
+        },
         "maxUserPriority": {
           "type": "integer",
           "minimum": 0
