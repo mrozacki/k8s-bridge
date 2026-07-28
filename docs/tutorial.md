@@ -708,8 +708,9 @@ it — and this composes with topology-aware scheduling too.
 > Verified live 2026-07-25.
 >
 > ```bash
-> source ./experiments/01-gke-playground/scripts/00-env.sh   # exports ZONE, CLUSTER_NAME
-> gcloud container clusters resize "${CLUSTER_NAME}" --num-nodes=4 --zone "${ZONE}" --quiet
+> export PROJECT_ID=<your-gcp-project>   # 00-env.sh has no default; unset leaves ZONE/CLUSTER_NAME empty
+> source ./experiments/01-gke-playground/scripts/00-env.sh
+> gcloud container clusters resize "${CLUSTER_NAME:?}" --num-nodes=4 --zone "${ZONE:?}" --quiet
 > # then re-run section 1's labelling loop so the new node joins the topology
 > ```
 
@@ -860,24 +861,40 @@ that does not exist yet.
 > (section 5). Skip this on a first pass, and if you do run it, make sure
 > section 16's teardown happens even if you stop halfway.
 
-**13a. The node pool.** `--enable-queued-provisioning` is the load-bearing
+**12a. The node pool.** `--enable-queued-provisioning` is the load-bearing
 flag — `--flex-start` alone is not enough for the Cluster Autoscaler to
 service Kueue's `ProvisioningRequest` objects. `--reservation-affinity=none`
 is mandatory or the create call is rejected outright.
 
 ```bash
+# Re-export PROJECT_ID if this is a fresh shell — 00-env.sh has no default and
+# stops on the unset variable, which leaves ZONE and CLUSTER_NAME EMPTY and
+# makes the gcloud call below run with `--cluster "" --zone ""`. This section
+# is marked optional, so arriving here in a new terminal is the normal case.
+export PROJECT_ID=<your-gcp-project>
 source ./experiments/01-gke-playground/scripts/00-env.sh   # exports ZONE, CLUSTER_NAME
+echo "cluster=${CLUSTER_NAME:?} zone=${ZONE:?}"            # both must be non-empty
 
 # ZONE is parameterised deliberately: L4 availability is zone-specific, so a
 # hardcoded zone fails for anyone running elsewhere. Override it before
 # sourcing if needed, e.g. export ZONE=us-central1-a.
+#
+# --node-labels is not optional either: the bridge stamps a topology annotation
+# on every JobSet it creates, so the flavor backing this pool must be
+# TAS-enabled (it is — see dws-gpu-qp.yaml) and its nodes must carry the
+# matching level labels, or a provisioned GPU node is invisible to placement.
 gcloud container node-pools create dws-gpu-qp --cluster "${CLUSTER_NAME}" --zone "${ZONE}" \
   --machine-type g2-standard-4 --accelerator type=nvidia-l4,count=1 \
   --num-nodes 0 --enable-autoscaling --min-nodes 0 --max-nodes 2 \
-  --enable-queued-provisioning --reservation-affinity=none
+  --enable-queued-provisioning --reservation-affinity=none \
+  --node-labels=example.com/topology-managed=true,example.com/block=block-a,example.com/rack=rack-1
 ```
 
-**13b. The Kueue admission chain.** This ships as one file — the
+Creating this pool costs nothing while it sits at zero nodes, and it does not
+consume GPU quota until a `ProvisioningRequest` is actually fulfilled —
+verified live 2026-07-28.
+
+**12b. The Kueue admission chain.** This ships as one file — the
 `ProvisioningRequestConfig` → `AdmissionCheck` → `ClusterQueue` stack that
 the previous version of this section left as an exercise:
 
@@ -887,7 +904,7 @@ kubectl get provisioningrequestconfig,admissioncheck
 kubectl get clusterqueue dws-gpu-cq
 ```
 
-**13c. Point a Slurm partition at it.** This is what makes DWS a bridge
+**12c. Point a Slurm partition at it.** This is what makes DWS a bridge
 story rather than a Kubernetes one: the researcher keeps typing `sbatch`,
 and GKE queues up accelerator capacity underneath them.
 
@@ -911,11 +928,39 @@ kubectl get workload -n slurm-jobs -o 'custom-columns=NAME:.metadata.name,QUEUE:
 ordinary `sbatch`, and the resulting `Workload`'s `queueName` reading
 `dws-gpu-lq` — the Slurm user never named a Kubernetes queue.
 
-**Expected result:** the `ProvisioningRequest` reaches `Accepted: True`
-(`Reason: SuccessfullyQueued`) and the workload stays inadmissible until GKE
-reports capacity. This chain was validated to that point on 2026-07-08;
-physical L4 boot and job completion were **not** scoped in that run, so
-treat anything past `Accepted` as unverified.
+**Expected result** (walked live 2026-07-28, on an account with *no* GPU
+quota — which turns out to be a useful way to see the queueing behaviour):
+
+```
+Workload   QuotaReserved  True   Quota reserved in ClusterQueue dws-gpu-cq
+           ProvisioningRequestCreated: jobset-slurm-job-1-...-dws-gpu-check-1
+
+ProvisioningRequest
+           Accepted     True   SuccessfullyQueued
+           Provisioned  False  ResourcePoolExhausted: Waiting for resources
+```
+
+That `Provisioned: False` is DWS working, not failing: the request **queues**
+and waits for capacity rather than erroring out. On an account with quota and
+available L4s it proceeds to `Provisioned: True` and a node joins. Physical L4
+boot and job completion have still **not** been validated by this project —
+treat anything past `Provisioned` as unverified.
+
+> **Two prerequisites that fail silently if you skip them**, both found live:
+>
+> 1. **`gpu-priority` must exist.** The sample CR maps `mixing-gpu` to it. If
+>    the `WorkloadPriorityClass` is missing, Kueue's reconciler errors with
+>    `WorkloadPriorityClass "gpu-priority" not found` and **never creates a
+>    Workload** — the JobSet sits `Suspended` forever, the Slurm job hangs, and
+>    the bridge cheerfully reports `Ready=True`. `03-configure-queues.sh` now
+>    creates it; if you built your queues by hand, add it.
+> 2. **The flavor must be TAS-enabled.** The bridge stamps a podset topology
+>    annotation on every JobSet (topology is a per-CR setting, not
+>    per-partition), and Kueue refuses a flavor without `topologyName`:
+>    `Flavor "dws-gpu-flavor" does not support TopologyAwareScheduling`. The
+>    Workload then never reserves quota, so no `ProvisioningRequest` appears at
+>    all. Shipped fixed in `dws-gpu-qp.yaml` — worth knowing if you write your
+>    own flavor for a partition the bridge routes to.
 
 > **`PROVISIONED` does not mean "pods are running".** Once the request flips
 > to `PROVISIONED` the VM has joined the cluster, but GPU pods can stay
@@ -1145,6 +1190,9 @@ leftover resource first.
 | two bridges, only one doing anything | the local binary and the chart are both running and share the `k8s-bridge-leader` Lease; check `holderIdentity` and stop one |
 | every job Pending on a hand-built cluster | node allocatable CPU is below the 1000m the tutorial requests per task (`e2-medium` is ~940m) — use `e2-standard-4` |
 | DWS request says `PROVISIONED` but GPU pods stay `Pending` | the NVIDIA driver DaemonSet hasn't finished on the new node, so `nvidia.com/gpu` isn't advertised yet — wait rather than debug the bridge (section 12) |
+| JobSet stuck `Suspended`, **no `Workload` object at all**, bridge says `Ready=True` | the partition's `workloadPriorityClass` does not exist. Kueue's reconciler fails with `WorkloadPriorityClass "<name>" not found` and never creates the Workload; nothing on the bridge side looks wrong. `kubectl get workloadpriorityclass`, then `kubectl -n kueue-system logs deploy/kueue-controller-manager \| grep -i priority` |
+| Workload `Pending` with `does not support TopologyAwareScheduling`, no `ProvisioningRequest` | the `ResourceFlavor` has no `topologyName`. The bridge annotates every JobSet with a podset topology (a per-CR setting), so **every** flavor it routes to must be TAS-enabled — and that flavor's nodes need the matching level labels |
+| `gcloud` runs with `--cluster "" --zone ""` | you sourced `00-env.sh` in a shell where `PROJECT_ID` was unset: it stops on the unset variable and never exports `ZONE`/`CLUSTER_NAME`. Re-export `PROJECT_ID` first (section 12 shows the pattern) |
 | everything pending, "no topology domains" | you forgot the node labels (section 1) |
 | jobs un-releasable, "priority request forwarded" on release | old lua plugin: `hold(0)`/`release(INFINITE)` must pass through |
 | GPU node drained, "count reported lower" | `gres.conf` must be `Name=gpu File=/dev/null` (count-only alone is not enough for the gpu type) and mounted into the slurmd conf-cache |

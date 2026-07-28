@@ -30,6 +30,16 @@ metadata:
 spec:
   nodeLabels:
     cloud.google.com/gke-nodepool: dws-gpu-qp
+  # REQUIRED when k8s-bridge routes a partition at this flavor. The bridge
+  # stamps a podset topology annotation on EVERY JobSet it creates (topology is
+  # a per-CR setting, not per-partition), and Kueue refuses to assign a flavor
+  # that is not TAS-enabled: "Flavor \"dws-gpu-flavor\" does not support
+  # TopologyAwareScheduling". The Workload then never reserves quota, so no
+  # ProvisioningRequest is ever created and DWS looks broken when it is not.
+  # Found live 2026-07-28. The nodes of the dws-gpu-qp pool must carry the
+  # matching level labels — create it with:
+  #   --node-labels=example.com/topology-managed=true,example.com/block=block-a,example.com/rack=rack-1
+  topologyName: simulated-dc
   tolerations:
     - key: "nvidia.com/gpu"
       operator: "Exists"

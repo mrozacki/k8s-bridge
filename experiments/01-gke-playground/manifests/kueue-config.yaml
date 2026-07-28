@@ -63,3 +63,21 @@ metadata:
   name: normal-priority
 value: 100
 description: "Default for batch workloads (Slurm 'main' partition, K8s Jobs, Ray)"
+---
+# Referenced by the shipped sample CR's "mixing-gpu" partition
+# (deploy/crd/workloadmixing-sample.yaml). It was missing until 2026-07-28,
+# and the failure mode is genuinely nasty: Kueue's JobSet reconciler errors
+# with `WorkloadPriorityClass "gpu-priority" not found` and NEVER creates a
+# Workload, so the JobSet sits Suspended forever and the Slurm job hangs —
+# while the bridge reports Ready=True and logs "created JobSet". Nothing on
+# the bridge side looks wrong; the only evidence is in the Kueue controller's
+# log. Found live walking the DWS section.
+#
+# Above high-priority on purpose: accelerator capacity is the scarce resource,
+# so a queued GPU job should outrank a CPU one competing for admission.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: gpu-priority
+value: 2000
+description: "Accelerator-backed Slurm partitions (mixing-gpu); scarcer resource than CPU, so ranked above high-priority"

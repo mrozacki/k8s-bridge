@@ -5,7 +5,39 @@ follows [Keep a Changelog](https://keepachangelog.com/); until 1.0 there are
 NO compatibility promises between versions (see docs/upgrade-guide.md), and
 breaking changes are called out per release.
 
-## Unreleased
+## v0.3.2 — 2026-07-28
+
+Ships the Ray documentation change that missed the v0.3.1 tag, plus four
+defects found by walking the DWS section on a live cluster. No API changes.
+
+### Fixed
+- **`gpu-priority` was referenced but never created.** The shipped sample CR
+  maps the `mixing-gpu` partition to a `WorkloadPriorityClass` that
+  `kueue-config.yaml` did not define. The failure mode is silent in the worst
+  way: Kueue's reconciler fails with `WorkloadPriorityClass "gpu-priority" not
+  found` and **never creates a Workload**, so the JobSet sits `Suspended`
+  forever and the Slurm job hangs — while the bridge reports `Ready=True`,
+  ticks normally, and emits a `Created` event. Every operator-facing surface
+  looks healthy; the only evidence is in the Kueue controller's log. The class
+  now ships (value 2000, above `high-priority`, since accelerators are the
+  scarcer resource).
+- **A ResourceFlavor the bridge routes to must be TAS-enabled.** `topology` is
+  a per-CR setting, so the bridge annotates *every* JobSet it creates with a
+  podset topology. Kueue then refuses any flavor lacking `topologyName`
+  (`Flavor "dws-gpu-flavor" does not support TopologyAwareScheduling`), the
+  Workload never reserves quota, and **no `ProvisioningRequest` is created at
+  all** — DWS looks broken when it is not. `dws-gpu-qp.yaml` now sets
+  `topologyName`, and the documented node-pool command adds the matching
+  `--node-labels`. This affects anyone writing their own flavor for a
+  bridge-routed partition, with or without GPUs.
+- **`source 00-env.sh` in a fresh shell produced empty `gcloud` flags.** The
+  DWS section is marked optional, so arriving in a new terminal is normal;
+  there `PROJECT_ID` is unset, the script stops on it, and `ZONE`/`CLUSTER_NAME`
+  are never exported — the next command ran `--cluster "" --zone ""`. Both the
+  DWS and the cluster-resize snippets now re-export `PROJECT_ID` and assert the
+  variables with `${VAR:?}`.
+- **Stale `13a/13b/13c` sub-headings** left behind when the Ray removal
+  renumbered section 13 to 12.
 
 ### Changed
 - **`ray-bridge` is now labelled experimental**, and Ray has been removed from
@@ -22,11 +54,20 @@ breaking changes are called out per release.
   is reversible once ray-bridge has a live multi-node validation. See the
   2026-07-27 status update appended to ADR-0002.
 
-  This landed on `main` shortly **after** v0.3.1 was tagged, so it is **not**
-  in the published v0.3.1 artifacts — the released tutorial and chart still
-  describe Ray as they did in v0.3.0. It ships in the next release. The chart
-  versions on `main` (k8s-bridge 0.4.1, ray-bridge 0.3.1) are the ones v0.3.1
-  published; bump them again when cutting the next tag.
+  This landed on `main` shortly after v0.3.1 was tagged, so it is absent from
+  the published v0.3.1 artifacts — those still describe Ray as v0.3.0 did.
+  v0.3.2 is the release that carries it.
+
+### Validation
+- The DWS section was walked live on GKE 2026-07-28. The chain now reaches
+  `ProvisioningRequest Accepted=True / Provisioned=False ResourcePoolExhausted`
+  from an ordinary `sbatch --partition=mixing-gpu`, with the Workload routed to
+  `dws-gpu-lq` — queued provisioning working as intended, waiting for capacity
+  rather than erroring.
+- **Still unvalidated:** anything past `Provisioned: True` — L4 boot, driver
+  install, job completion. The account used has `GPUS_ALL_REGIONS` set to 0
+  globally, so this cannot be exercised there at any price. Both documents say
+  so explicitly rather than implying coverage.
 
 ## v0.3.1 — 2026-07-27
 
@@ -107,7 +148,7 @@ breaking changes; the one new API field defaults to the previous behaviour.
   scope because its shared-cluster admission gap is the problem this project
   exists to close. (Ray *was* subsequently dropped from the
   tutorial, but on maturity grounds and without touching the scope decision —
-  see Unreleased above. That landed after this tag was cut. The two are
+  see v0.3.2 above. That landed after this tag was cut. The two are
   different actions with different consequences.) "Pin the
   cluster to `e2-standard-4`" was already the case in `00-env.sh`; the real
   concern underneath it (allocatable CPU below one full core on a hand-built

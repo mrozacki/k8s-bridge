@@ -780,15 +780,23 @@ service Kueue's `ProvisioningRequest` objects (S1–S5 lesson 4).
 `--reservation-affinity=none` is mandatory or the create call fails.
 
 ```bash
-source ./experiments/01-gke-playground/scripts/00-env.sh   # exports ZONE, CLUSTER_NAME
+# Re-export PROJECT_ID in a fresh shell: 00-env.sh has no default and stops on
+# the unset variable, leaving ZONE and CLUSTER_NAME EMPTY — the gcloud call then
+# runs with `--cluster "" --zone ""`. Measured live 2026-07-28.
+export PROJECT_ID=<your-sandbox-project>
+source ./experiments/01-gke-playground/scripts/00-env.sh
+echo "cluster=${CLUSTER_NAME:?} zone=${ZONE:?}"
 
 # Zone is parameterised on purpose: L4 availability is zone-specific, and a
 # hardcoded europe-* zone silently fails for anyone running elsewhere.
-# Override before sourcing, e.g. export ZONE=us-central1-a.
+# --node-labels is equally load-bearing: the bridge annotates every JobSet with
+# a podset topology, so this pool's nodes need the matching level labels or a
+# provisioned GPU node is invisible to placement.
 gcloud container node-pools create dws-gpu-qp --cluster "${CLUSTER_NAME}" --zone "${ZONE}" \
   --machine-type g2-standard-4 --accelerator type=nvidia-l4,count=1 \
   --num-nodes 0 --enable-autoscaling --min-nodes 0 --max-nodes 2 \
-  --enable-queued-provisioning --reservation-affinity=none
+  --enable-queued-provisioning --reservation-affinity=none \
+  --node-labels=example.com/topology-managed=true,example.com/block=block-a,example.com/rack=rack-1
 ```
 
 **13b. The Kueue admission chain**, shipped as one file — this is the
@@ -827,11 +835,26 @@ kubectl get workload -n slurm-jobs -o 'custom-columns=NAME:.metadata.name,QUEUE:
 `sbatch`, and the `Workload`'s `queueName` reading `dws-gpu-lq` — the Slurm
 user never named a Kubernetes queue.
 
-**Expected:** the `ProvisioningRequest` reaches `Accepted: True`
-(`Reason: SuccessfullyQueued`) and the workload stays inadmissible until GKE
-reports capacity. Validated to this point on the employer account
-2026-07-08; **physical L4 boot and job completion were not scoped in that
-run**, so treat everything past `Accepted` as unverified here.
+**Expected** (walked live 2026-07-28 on an account with NO GPU quota, which
+is a useful way to see the queueing behaviour):
+
+```
+Workload             QuotaReserved True  in ClusterQueue dws-gpu-cq
+ProvisioningRequest  Accepted      True  SuccessfullyQueued
+                     Provisioned   False ResourcePoolExhausted: Waiting for resources
+```
+
+`Provisioned: False` is DWS working, not failing — the request QUEUES for
+capacity instead of erroring. With quota and available L4s it goes on to
+`Provisioned: True`. Physical L4 boot and job completion remain unvalidated.
+
+> **Two prerequisites that fail silently.** (1) `gpu-priority` must exist —
+> without it Kueue never creates a Workload, the JobSet sits Suspended
+> forever, the Slurm job hangs, and the bridge still reports `Ready=True`;
+> `kueue-config.yaml` now ships it. (2) The flavor must set `topologyName` —
+> the bridge annotates every JobSet with a podset topology, and Kueue refuses
+> a non-TAS flavor, so no `ProvisioningRequest` is ever created. Both found
+> live 2026-07-28.
 
 > **`PROVISIONED` does not mean "pods running".** Once the
 > `ProvisioningRequest` flips to `PROVISIONED` the VM has joined the cluster,
@@ -1045,6 +1068,9 @@ leftover resource before walking away.
 | `patch workloadmixing` rejected, "must use https unless allowInsecureHTTP is set" | the CRD's CEL rule refuses a plaintext URL on its own — patch `allowInsecureHTTP: true` in the same merge (§2) |
 | autoscaler deletes "racks" | pin the pool: min-nodes = num-nodes |
 | flex-start create fails on reservations | add `--reservation-affinity=none` |
+| JobSet stuck `Suspended`, NO Workload object at all, bridge says `Ready=True` | the partition's `workloadPriorityClass` does not exist — Kueue's reconciler fails with `WorkloadPriorityClass "<name>" not found` and never creates the Workload. Nothing bridge-side looks wrong. `kubectl get workloadpriorityclass`, then the kueue-controller-manager log (§13) |
+| Workload `Pending`, `does not support TopologyAwareScheduling`, no ProvisioningRequest | the ResourceFlavor lacks `topologyName`. The bridge annotates EVERY JobSet with a podset topology (per-CR setting), so every flavor it routes to must be TAS-enabled, with matching node labels (§13) |
+| `gcloud` runs with `--cluster "" --zone ""` | `00-env.sh` was sourced with `PROJECT_ID` unset: it stops there and never exports `ZONE`/`CLUSTER_NAME`. Re-export `PROJECT_ID` first (§13) |
 | DWS provisioning request `Failed` | GKE rejects CPU-only DWS Flex today — accelerators required (backlog A5); use Custom Compute Classes (§13 alternative) instead for a working demo of queued/preferred node classes |
 | JobSet dead but Slurm job still pending | the bridge fails the job on a JobSet `Failed` condition (D1, §14) — if it doesn't, check the bridge is ticking (§2) and watch `k8s_bridge_jobs_failed_total` |
 | `sbatch` hangs / no comment update | check the bridge process is running and its `Ready` condition (§2) — bridge-down is safe but nothing progresses until it's back |
