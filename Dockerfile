@@ -11,7 +11,7 @@
 # simply changed upstream tag would flow straight into a release image with no
 # diff anywhere in this repo. Dependabot understands this form and bumps tag
 # and digest together.
-FROM golang:1.26@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS build
+FROM golang:1.27@sha256:65b6f280bf050ec5af12716857e8ea8439d694dbba8f31ceeb7630670071f2bb AS build
 WORKDIR /src
 
 # Cache module downloads separately from source changes.
