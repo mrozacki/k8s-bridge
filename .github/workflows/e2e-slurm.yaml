@@ -94,7 +94,7 @@ jobs:
         # repo yet; this SHA is upstream's v4.6.2 tag. Confirm it against
         # https://github.com/actions/upload-artifact/releases before the
         # first dispatch run (Dependabot will keep it current afterwards).
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-slurm-diagnostics
           path: ${{ github.workspace }}/e2e-slurm-diagnostics/
