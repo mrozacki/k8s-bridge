@@ -134,7 +134,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       # Installs the `cosign` binary only; keyless signing needs no key
       # material, so there is nothing to configure here.
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       # M4: decide ONCE, for both images, whether this tag is allowed to move
       # `:latest`. Before this gate every tag matching `v*` republished
       # `:latest`, so tagging `v1.3.0-rc1` for a handful of testers silently
